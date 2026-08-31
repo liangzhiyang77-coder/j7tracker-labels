@@ -746,19 +746,29 @@
     return result;
   }
 
+  let quickLabelEditorCleanup = null;
+
   function closeQuickLabelEditor() {
+    if (quickLabelEditorCleanup) quickLabelEditorCleanup();
+    quickLabelEditorCleanup = null;
     const old = document.getElementById('j7zh-label-editor');
     if (old) old.remove();
   }
 
-  function openQuickLabelEditor(username, anchor) {
+  function openQuickLabelEditor(username) {
     closeQuickLabelEditor();
     const row = LABELS.map.get(username.toLowerCase());
     const editor = document.createElement('div');
     editor.id = 'j7zh-label-editor';
     editor.className = 'j7zh-label-editor';
+    editor.setAttribute('role', 'dialog');
+    editor.setAttribute('aria-modal', 'false');
+    editor.setAttribute('aria-labelledby', 'j7zh-label-editor-title');
     editor.innerHTML = '<div class="j7zh-label-editor-title"></div><div class="j7zh-label-editor-line"><input type="text" maxlength="100" placeholder="输入自定义备注"><button type="button" data-action="save">保存</button><button type="button" data-action="delete">隐藏</button><button type="button" data-action="close">×</button></div><small>自定义备注优先显示；隐藏后可在「编辑备注」中恢复 Frontrun 备注。</small>';
-    editor.querySelector('.j7zh-label-editor-title').textContent = '@' + username + ' · 编辑备注';
+    const title = editor.querySelector('.j7zh-label-editor-title');
+    title.id = 'j7zh-label-editor-title';
+    title.textContent = '⋮⋮  @' + username + ' · 编辑备注';
+    title.title = '拖动标题可移动窗口';
     const input = editor.querySelector('input');
     input.value = displayLabel(row);
     const restoreButton = document.createElement('button');
@@ -766,13 +776,64 @@
     restoreButton.dataset.action = 'restore';
     restoreButton.textContent = '恢复 Frontrun';
     if (!row || row.source !== 'USER') restoreButton.hidden = true;
-    editor.querySelector('.j7zh-label-editor-line').appendChild(restoreButton);
+    const actionLine = editor.querySelector('.j7zh-label-editor-line');
+    actionLine.insertBefore(restoreButton, actionLine.querySelector('[data-action="close"]'));
     document.body.appendChild(editor);
-    const rect = anchor.getBoundingClientRect();
-    const width = Math.min(430, window.innerWidth - 20);
-    editor.style.width = width + 'px';
-    editor.style.left = Math.max(10, Math.min(rect.left, window.innerWidth - width - 10)) + 'px';
-    editor.style.top = Math.min(window.innerHeight - editor.offsetHeight - 10, rect.bottom + 7) + 'px';
+
+    const viewportPadding = 12;
+    let drag = null;
+    const placeEditor = (left, top) => {
+      const maxLeft = Math.max(viewportPadding, window.innerWidth - editor.offsetWidth - viewportPadding);
+      const maxTop = Math.max(viewportPadding, window.innerHeight - editor.offsetHeight - viewportPadding);
+      editor.style.left = Math.max(viewportPadding, Math.min(maxLeft, left)) + 'px';
+      editor.style.top = Math.max(viewportPadding, Math.min(maxTop, top)) + 'px';
+    };
+    const centerEditor = () => placeEditor((window.innerWidth - editor.offsetWidth) / 2, (window.innerHeight - editor.offsetHeight) / 2);
+    const onPointerMove = (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      placeEditor(drag.left + event.clientX - drag.x, drag.top + event.clientY - drag.y);
+    };
+    const stopDragging = (event) => {
+      if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+      const pointerId = drag.pointerId;
+      drag = null;
+      title.classList.remove('is-dragging');
+      document.removeEventListener('pointermove', onPointerMove, true);
+      document.removeEventListener('pointerup', stopDragging, true);
+      document.removeEventListener('pointercancel', stopDragging, true);
+      try { if (title.hasPointerCapture(pointerId)) title.releasePointerCapture(pointerId); } catch (error) {}
+    };
+    const onPointerDown = (event) => {
+      if (event.button !== 0 || drag) return;
+      const rect = editor.getBoundingClientRect();
+      drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+      editor.dataset.dragged = '1';
+      title.classList.add('is-dragging');
+      try { title.setPointerCapture(event.pointerId); } catch (error) {}
+      document.addEventListener('pointermove', onPointerMove, true);
+      document.addEventListener('pointerup', stopDragging, true);
+      document.addEventListener('pointercancel', stopDragging, true);
+      event.preventDefault();
+    };
+    const onResize = () => {
+      if (editor.dataset.dragged === '1') {
+        const rect = editor.getBoundingClientRect();
+        placeEditor(rect.left, rect.top);
+      } else centerEditor();
+    };
+    const onWindowBlur = () => stopDragging();
+    title.addEventListener('pointerdown', onPointerDown);
+    title.addEventListener('lostpointercapture', stopDragging);
+    window.addEventListener('resize', onResize);
+    window.addEventListener('blur', onWindowBlur);
+    quickLabelEditorCleanup = () => {
+      stopDragging();
+      title.removeEventListener('pointerdown', onPointerDown);
+      title.removeEventListener('lostpointercapture', stopDragging);
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('blur', onWindowBlur);
+    };
+    centerEditor();
     editor.addEventListener('click', async (event) => {
       event.stopPropagation();
       const action = event.target && event.target.dataset && event.target.dataset.action;
@@ -869,7 +930,7 @@
         const activate = (event) => {
           if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
           event.preventDefault(); event.stopPropagation();
-          openQuickLabelEditor(username, edit);
+          openQuickLabelEditor(username);
         };
         edit.addEventListener('click', activate);
         edit.addEventListener('keydown', activate);
@@ -1288,7 +1349,7 @@
 
   /* ---------- 启动 ---------- */
   // 调试钩子（控制台可用 __j7zh.walk(document.body) 手动补扫，__j7zh.scan() 重扫翻译）
-  window.__j7zh = { walk, lookup, settings: S, version: '1.7.2', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
+  window.__j7zh = { walk, lookup, settings: S, version: '1.7.3', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
 
   document.addEventListener('pointerdown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
   document.addEventListener('keydown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
