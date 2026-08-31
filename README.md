@@ -11,7 +11,7 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 | **点击关键词复制** | 站点会把关键词（AI 预测名、你设置的关键词、CA 等）标成高亮药丸——点一下即复制该词到剪贴板，弹「已复制」气泡；悬停有描边提示。站点原生没有这个能力（药丸默认 `pointer-events: none`，本扩展恢复了它的可点性） |
 | **复制后 GMGN 搜索** | 点关键词后在**后台**打开/复用 GMGN（gmgn.ai）标签页并在其搜索弹窗填入该词——不切走焦点，人留在 j7 继续看流，想看结果自己切过去（配合浏览器分屏体验最佳）。始终复用同一个标签页，不会越开越多。GMGN 首次打开搜索弹窗要求可信事件，本扩展通过直接调用其 React `onFocus` 处理函数绕过（`gmgn.js` 以 MAIN world 注入）；后台打开由 service worker 的 `tabs` API 完成（因此声明了 `tabs` 权限）。已有 GMGN 页时**不做任何导航**——background 经 `gmgn-bridge.js` 直接发消息给页面原地换搜索词，零刷新 |
 | **正文翻译** | 推文 / 引用 / 回复 / 资料简介自动翻成中文，以「译」块附在原文下方。默认走 **Chrome 内置离线翻译**（Translator API，快、无限流、不出网），Google 网页接口兜底；带本地缓存，刷新不重翻 |
-| **Twitter 标签备注** | 按 username 在作者时间后显示 Frontrun `position`。内置 1493 个账号数据，支持 JSON 导入/导出、缺失账号自动补全和全部更新 |
+| **Twitter 标签备注** | 按 username 在作者时间后显示备注。内置 1493 个 Frontrun 日常使用记录，支持卡片快捷编辑、集中增删改查、JSON 导入/导出、缺失账号自动补全和全部更新 |
 
 ## 安装
 
@@ -32,11 +32,27 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 
 ### Twitter 标签
 
-1. 打开「Twitter 标签备注」即可使用内置数据；只有非空 `position` 会显示标签。
-2. 「导入」接受 JSON 数组，或含 `data` / `rows` / `labels` 数组的对象；每条记录使用 `twitterUsername` 和 `position`。同名账号不区分大小写，导入时覆盖同名、保留其他记录。
-3. 「导出」保存当前全部标签，但不会包含 Cookie 或 Frontrun 请求配置。
-4. 如需联网更新，从 DevTools 复制 Frontrun `batch-query-light` 请求的完整 cURL，粘贴后点「保存 Cookie」。输入框随后清空。
-5. 「更新无记录博主」只在刷到本地完全没有该 username 时补查；「全部更新」按每批最多 30 个、串行随机间隔刷新当前全部账号。面板会显示进度和接口剩余额度。
+当前内置备注数据库来自 **Frontrun 的日常使用记录**，不属于 J7Tracker 官方数据。每条 JSON 记录都带来源字段：`FRONTRUN` 表示 Frontrun 数据，`USER` 表示用户本地新增或修改。用户备注优先显示，后续 Frontrun 更新不会覆盖；点击「恢复 Frontrun」可回到原备注。
+
+![单条 Twitter 作者标签效果](docs/images/twitter-label-example-card.png)
+
+![J7 信息流中的 Twitter 作者标签效果](docs/images/twitter-label-example-feed.png)
+
+1. 打开「Twitter 标签备注」即可使用内置数据；只有非空 `position` 会显示标签。每个作者时间/标签旁都有铅笔 `✎`，点击后可输入并保存自定义备注。
+2. 菜单中的「编辑备注」提供集中管理：搜索、新增、修改、删除（隐藏）和恢复 Frontrun 备注。
+3. 「导入」接受 JSON 数组，或含 `data` / `rows` / `labels` 数组的对象；每条记录使用 `twitterUsername`、`position` 和 `source`。同名账号不区分大小写；用户备注优先于导入的 Frontrun 备注，其余同来源记录覆盖同名并保留其他记录。
+4. 「导出」保存当前全部标签及来源，但不会包含 Cookie 或 Frontrun 请求配置。
+5. 如需联网更新，从 DevTools 复制 Frontrun `batch-query-light` 请求的完整 cURL，粘贴后点「保存 Cookie」。输入框随后清空。
+6. 「更新无记录博主」只在刷到本地完全没有该 username 时补查；「全部更新」按每批最多 30 个、串行随机间隔刷新当前全部账号。面板会显示进度和接口剩余额度。
+
+数据示例：
+
+```json
+{"twitterUsername":"kieranwarwick","position":"Illuvium联创","source":"FRONTRUN"}
+{"twitterUsername":"example_user","position":"我自己添加的备注","source":"USER","frontrunPosition":"原 Frontrun 备注"}
+```
+
+删除 Frontrun 备注时会保存为 `source: "USER"` 和 `hidden: true`，所以刷新或全部更新后不会自动重新出现。自定义备注保存在当前浏览器的 `chrome.storage.local` 中。
 
 Frontrun Cookie 只保存在 `chrome.storage.local` 和目标域 Cookie 存储中。Cookie 失效后重新粘贴并保存新的 cURL 即可。
 
@@ -53,7 +69,7 @@ Frontrun Cookie 只保存在 `chrome.storage.local` 和目标域 Cookie 存储�
 
 - 界面汉化、阅读模式：纯本地，不发任何请求。
 - 正文翻译用本地引擎时：不出网。仅当本地不可用 / 语种不支持 / 手动选了 Google 时，推文文本（公开内容，不含你的账号信息）会发给 Google 翻译接口。
-- Twitter 标签默认只读本地数据。只有用户保存 Frontrun cURL 并主动开启自动补全或点击全部更新时，扩展才向 `loadbalance.frontrun.pro` 发送公开的 Twitter username。
+- Twitter 标签和用户自定义备注默认只读本地数据。只有用户保存 Frontrun cURL 并主动开启自动补全或点击全部更新时，扩展才向 `loadbalance.frontrun.pro` 发送公开的 Twitter username。
 - `host_permissions` 声明两个 Google 翻译域名和 Frontrun 标签接口；`gmgn.js` 只在带 `#j7q=` 标记时动作。扩展不收集、不上报其他数据。
 
 ## 文件说明
@@ -62,7 +78,7 @@ Frontrun Cookie 只保存在 `chrome.storage.local` 和目标域 Cookie 存储�
 | --- | --- |
 | `manifest.json` | MV3 清单，只在 `*.j7tracker.io` 运行 |
 | `label-utils.js` | username、导入数据、cURL/Cookie 和批次的纯逻辑解析，供 content 与 background 共用 |
-| `twitter-labels.seed.json` | 内置的 1493 个 `twitterUsername` / `position` 初始记录 |
+| `twitter-labels.seed.json` | 内置的 1493 个 `twitterUsername` / `position` / `source: FRONTRUN` 初始记录 |
 | `dict.js` | 英→中字典：`exact` 精确匹配、`regex` 带数字/变量的模式（含 12→24 小时制转换）、`context` 推文头部动词、`inButton` 按钮内特殊译法 |
 | `content.js` | 界面汉化引擎、正文翻译调度、作者标签注入和右下角菜单 |
 | `background.js` | service worker：代发 Google 翻译请求；持久化标签与 Frontrun 配置；串行批量更新、退避和进度广播 |

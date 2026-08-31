@@ -34,10 +34,20 @@
       const rawName = typeof item === 'string' ? item : item && (item.twitterUsername || item.username || item.screenName || item.handle);
       const twitterUsername = normalizeUsername(rawName);
       if (!twitterUsername) continue;
-      const position = typeof item === 'object' && item && typeof item.position === 'string' ? item.position.trim() : '';
+      const rawPosition = typeof item === 'object' && item && typeof item.position === 'string' ? item.position.trim() : '';
+      const legacyOverride = !!(typeof item === 'object' && item && item.localOverride === true);
+      const declaredSource = typeof item === 'object' && item && String(item.source || '').toUpperCase() === 'USER' ? 'USER' : 'FRONTRUN';
+      const source = legacyOverride ? 'USER' : declaredSource;
+      const position = legacyOverride && typeof item.localLabel === 'string' ? item.localLabel.trim() : rawPosition;
       const key = twitterUsername.toLowerCase();
       if (byName.has(key)) byName.delete(key);
-      byName.set(key, { twitterUsername, position });
+      const row = { twitterUsername, position, source };
+      if (source === 'USER') {
+        const provider = legacyOverride ? rawPosition : (typeof item.frontrunPosition === 'string' ? item.frontrunPosition.trim() : '');
+        if (provider) row.frontrunPosition = provider;
+        if (item.hidden === true || !position) row.hidden = true;
+      }
+      byName.set(key, row);
     }
     return [...byName.values()];
   }
@@ -47,7 +57,20 @@
   }
 
   function mapToRows(map) {
-    return [...map.values()].map((row) => ({ twitterUsername: row.twitterUsername, position: row.position || '' }));
+    return [...map.values()].map((row) => {
+      const source = row.source === 'USER' ? 'USER' : 'FRONTRUN';
+      const out = { twitterUsername: row.twitterUsername, position: row.position || '', source };
+      if (source === 'USER') {
+        if (row.frontrunPosition) out.frontrunPosition = row.frontrunPosition;
+        if (row.hidden === true || !row.position) out.hidden = true;
+      }
+      return out;
+    });
+  }
+
+  function effectiveLabel(row) {
+    if (!row) return '';
+    return row.hidden === true ? '' : String(row.position || '').trim();
   }
 
   function chunk(values, size) {
@@ -124,6 +147,7 @@
     normalizeRows,
     rowsToMap,
     mapToRows,
+    effectiveLabel,
     chunk,
     parseCookieHeader,
     parseCurlCommand,

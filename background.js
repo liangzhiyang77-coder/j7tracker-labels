@@ -147,8 +147,21 @@ async function ensureLabelRows() {
 
 async function persistLabelRows() {
   const rows = LABEL.mapToRows(labelMap);
-  await storageSet({ [LABEL_DATA_KEY]: { version: 1, updatedAt: new Date().toISOString(), rows } });
+  await storageSet({ [LABEL_DATA_KEY]: { version: 2, updatedAt: new Date().toISOString(), rows } });
   return rows;
+}
+
+function mergeProviderLabel(row) {
+  const key = row.twitterUsername.toLowerCase();
+  const existing = labelMap.get(key);
+  row.source = 'FRONTRUN';
+  if (existing && existing.source === 'USER') {
+    existing.frontrunPosition = row.position || '';
+    labelMap.set(key, existing);
+    return existing;
+  }
+  labelMap.set(key, row);
+  return row;
 }
 
 async function getPrivateLabelConfig() {
@@ -192,7 +205,8 @@ async function publicLabelState() {
   const stored = await storageGet([LABEL_CONFIG_KEY, LABEL_AUTO_KEY]);
   return {
     count: rows.length,
-    nonEmpty: rows.filter((row) => row.position).length,
+    nonEmpty: rows.filter((row) => LABEL.effectiveLabel(row)).length,
+    localCount: rows.filter((row) => row.source === 'USER').length,
     configSaved: !!stored[LABEL_CONFIG_KEY],
     configSavedAt: stored[LABEL_CONFIG_KEY] && stored[LABEL_CONFIG_KEY].savedAt || '',
     autoUpdate: stored[LABEL_AUTO_KEY] === true,
@@ -304,8 +318,7 @@ async function queryAndMergeLabels(usernames, options) {
     const rows = await fetchFrontrunBatch(batch);
     const returned = new Set(rows.map((row) => row.twitterUsername.toLowerCase()));
     for (const row of rows) {
-      labelMap.set(row.twitterUsername.toLowerCase(), row);
-      changed.push(row);
+      changed.push(mergeProviderLabel(row));
     }
     // 自动补全时，把接口明确未返回的 username 记成空记录，避免页面轮询反复请求。
     // 全量刷新则保留原值，防止接口偶发漏项把已有备注清空。
@@ -314,8 +327,7 @@ async function queryAndMergeLabels(usernames, options) {
         const key = username.toLowerCase();
         if (returned.has(key)) continue;
         const emptyRow = { twitterUsername: username, position: '' };
-        labelMap.set(key, emptyRow);
-        changed.push(emptyRow);
+        changed.push(mergeProviderLabel(emptyRow));
       }
     }
     done += batch.length;
@@ -334,10 +346,57 @@ async function importLabelRows(input) {
   await ensureLabelRows();
   const rows = LABEL.normalizeRows(input);
   if (!rows.length) throw new Error('导入文件里没有有效的 twitterUsername/position');
-  for (const row of rows) labelMap.set(row.twitterUsername.toLowerCase(), row);
+  const changed = [];
+  for (const row of rows) {
+    const key = row.twitterUsername.toLowerCase();
+    const existing = labelMap.get(key);
+    if (row.source !== 'USER' && existing && existing.source === 'USER') {
+      existing.frontrunPosition = row.position || '';
+      labelMap.set(key, existing);
+      changed.push(existing);
+      continue;
+    }
+    labelMap.set(key, row);
+    changed.push(row);
+  }
   await persistLabelRows();
-  await broadcastLabelMessage({ type: 'j7zh-labels-changed', rows, state: await publicLabelState() });
+  await broadcastLabelMessage({ type: 'j7zh-labels-changed', rows: changed, state: await publicLabelState() });
   return { imported: rows.length, state: await publicLabelState() };
+}
+
+async function updateLocalLabel(username, action, value) {
+  await ensureLabelRows();
+  const twitterUsername = LABEL.normalizeUsername(username);
+  if (!twitterUsername) throw new Error('请输入有效的 Twitter username');
+  const key = twitterUsername.toLowerCase();
+  const row = labelMap.get(key) || { twitterUsername, position: '', source: 'FRONTRUN' };
+  if (action === 'restore') {
+    row.position = row.source === 'USER' ? (row.frontrunPosition || '') : row.position;
+    row.source = 'FRONTRUN';
+    delete row.frontrunPosition;
+    delete row.hidden;
+  } else if (action === 'delete') {
+    if (row.source !== 'USER' && row.position) row.frontrunPosition = row.position;
+    row.position = '';
+    row.source = 'USER';
+    row.hidden = true;
+  } else if (action === 'save') {
+    const localLabel = String(value || '').trim();
+    if (!localLabel) throw new Error('备注不能为空；要隐藏备注请使用删除');
+    if (localLabel.length > 100) throw new Error('备注最多 100 个字符');
+    if (row.source !== 'USER' && row.position) row.frontrunPosition = row.position;
+    row.position = localLabel;
+    row.source = 'USER';
+    delete row.hidden;
+  } else {
+    throw new Error('未知的备注操作');
+  }
+  labelMap.set(key, row);
+  await persistLabelRows();
+  const resultRow = LABEL.mapToRows(new Map([[key, row]]))[0];
+  const state = await publicLabelState();
+  await broadcastLabelMessage({ type: 'j7zh-labels-changed', rows: [resultRow], state });
+  return { row: resultRow, state };
 }
 
 async function queryMissingLabels(usernames) {
@@ -372,6 +431,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { rows: await ensureLabelRows(), state: await publicLabelState() };
       case 'j7zh-labels-import':
         return importLabelRows(msg.data);
+      case 'j7zh-label-local-set':
+        return updateLocalLabel(msg.username, msg.action, msg.value);
       case 'j7zh-label-config-save':
         return { config: await saveFrontrunConfig(String(msg.command || '')), state: await publicLabelState() };
       case 'j7zh-label-auto-set':

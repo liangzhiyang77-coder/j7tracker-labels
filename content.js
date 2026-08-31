@@ -51,7 +51,8 @@
   /* ---------- 跳过的容器（用户内容 / 数据） ---------- */
   const EXCLUDE_SEL = [
     'script', 'style', 'textarea', 'input', 'code', 'pre', 'kbd', '[contenteditable]',
-    '#j7zh-toggle', '#j7zh-menu', '.j7zh-trans', '.j7zh-user-label', '.j7zh-label-panel',
+    '#j7zh-toggle', '#j7zh-menu', '.j7zh-trans', '.j7zh-user-label', '.j7zh-label-edit',
+    '.j7zh-label-panel', '.j7zh-label-editor', '.j7zh-label-manager',
     // 推文正文与引用
     '.tweet-content', '.quoted-tweet', '.nested-quoted-tweet', '.reply-to-tweet',
     '.pinned-text', '.pinned-tweet-content', '.pinned-update-content', '.following-update-content',
@@ -182,7 +183,9 @@
   const SKIP_TAGS = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1 };
   function isOurs(el) {
     return el.id === 'j7zh-toggle' || el.id === 'j7zh-menu' ||
-      (el.classList && (el.classList.contains('j7zh-trans') || el.classList.contains('j7zh-user-label') || el.classList.contains('j7zh-label-panel')));
+      (el.classList && (el.classList.contains('j7zh-trans') || el.classList.contains('j7zh-user-label') ||
+        el.classList.contains('j7zh-label-edit') || el.classList.contains('j7zh-label-panel') ||
+        el.classList.contains('j7zh-label-editor') || el.classList.contains('j7zh-label-manager')));
   }
 
   function walk(root) {
@@ -655,6 +658,7 @@
     configSaved: false,
     count: 0,
     nonEmpty: 0,
+    localCount: 0,
     job: { busy: false, phase: 'idle', current: 0, total: 0, updated: 0, error: '' },
     rate: null,
     missing: new Set(),
@@ -681,7 +685,8 @@
     for (const row of LU.normalizeRows(rows)) LABELS.map.set(row.twitterUsername.toLowerCase(), row);
     LABELS.loaded = true;
     LABELS.count = LABELS.map.size;
-    LABELS.nonEmpty = [...LABELS.map.values()].filter((row) => row.position).length;
+    LABELS.nonEmpty = [...LABELS.map.values()].filter((row) => LU.effectiveLabel(row)).length;
+    LABELS.localCount = [...LABELS.map.values()].filter((row) => row.source === 'USER').length;
   }
 
   function applyPublicLabelState(state) {
@@ -690,6 +695,7 @@
     LABELS.configSaved = state.configSaved === true;
     LABELS.count = Number(state.count) || LABELS.map.size;
     LABELS.nonEmpty = Number(state.nonEmpty) || 0;
+    LABELS.localCount = Number(state.localCount) || 0;
     LABELS.job = state.job || LABELS.job;
     LABELS.rate = state.rate || null;
     renderLabelPanelState();
@@ -725,6 +731,65 @@
   function labelTarget(author) {
     return author.querySelector('.tweet-time, .modern-inline-time, .mlw-bb-time, .time-full, .time-short, time') ||
       author.querySelector('.tweet-author-name, .profile-name, strong, a[href]');
+  }
+
+  function displayLabel(row) { return LU ? LU.effectiveLabel(row) : ''; }
+
+  async function commitLocalLabel(username, action, value) {
+    const result = await sendLabelMessage({ type: 'j7zh-label-local-set', username, action, value: value || '' });
+    if (result.row) mergeLabelRows([result.row], false);
+    applyPublicLabelState(result.state);
+    scanLabels(document.body);
+    renderLabelManager();
+    return result;
+  }
+
+  function closeQuickLabelEditor() {
+    const old = document.getElementById('j7zh-label-editor');
+    if (old) old.remove();
+  }
+
+  function openQuickLabelEditor(username, anchor) {
+    closeQuickLabelEditor();
+    const row = LABELS.map.get(username.toLowerCase());
+    const editor = document.createElement('div');
+    editor.id = 'j7zh-label-editor';
+    editor.className = 'j7zh-label-editor';
+    editor.innerHTML = '<div class="j7zh-label-editor-title"></div><div class="j7zh-label-editor-line"><input type="text" maxlength="100" placeholder="输入自定义备注"><button type="button" data-action="save">保存</button><button type="button" data-action="delete">隐藏</button><button type="button" data-action="close">×</button></div><small>自定义备注优先显示；隐藏后可在「编辑备注」中恢复 Frontrun 备注。</small>';
+    editor.querySelector('.j7zh-label-editor-title').textContent = '@' + username + ' · 编辑备注';
+    const input = editor.querySelector('input');
+    input.value = displayLabel(row);
+    const restoreButton = document.createElement('button');
+    restoreButton.type = 'button';
+    restoreButton.dataset.action = 'restore';
+    restoreButton.textContent = '恢复 Frontrun';
+    if (!row || row.source !== 'USER') restoreButton.hidden = true;
+    editor.querySelector('.j7zh-label-editor-line').appendChild(restoreButton);
+    document.body.appendChild(editor);
+    const rect = anchor.getBoundingClientRect();
+    const width = Math.min(430, window.innerWidth - 20);
+    editor.style.width = width + 'px';
+    editor.style.left = Math.max(10, Math.min(rect.left, window.innerWidth - width - 10)) + 'px';
+    editor.style.top = Math.min(window.innerHeight - editor.offsetHeight - 10, rect.bottom + 7) + 'px';
+    editor.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const action = event.target && event.target.dataset && event.target.dataset.action;
+      if (!action) return;
+      if (action === 'close') { closeQuickLabelEditor(); return; }
+      try {
+        await commitLocalLabel(username, action, input.value);
+        LABELS.status = action === 'save' ? '已保存 @' + username + ' 的自定义备注' : action === 'delete' ? '已隐藏 @' + username + ' 的备注' : '已恢复 @' + username + ' 的 Frontrun 备注';
+        closeQuickLabelEditor();
+        renderLabelPanelState();
+      } catch (error) {
+        editor.querySelector('small').textContent = '操作失败：' + error.message;
+      }
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') editor.querySelector('[data-action="save"]').click();
+      if (event.key === 'Escape') closeQuickLabelEditor();
+    });
+    setTimeout(() => { input.focus(); input.select(); }, 0);
   }
 
   function queueMissingLabel(username) {
@@ -764,32 +829,191 @@
       if (!username) continue;
       const key = username.toLowerCase();
       const row = LABELS.map.get(key);
+      const label = displayLabel(row);
       let badge = author.querySelector('.j7zh-user-label[data-j7zh-user="' + key + '"]');
-      if (!S.labels || !row || !row.position) {
+      let edit = author.querySelector('.j7zh-label-edit[data-j7zh-user="' + key + '"]');
+      if (!S.labels) {
         if (badge) badge.remove();
-        if (S.labels && LABELS.loaded && !LABELS.map.has(key)) queueMissingLabel(username);
+        if (edit) edit.remove();
         continue;
       }
-      if (!badge) {
+      const target = labelTarget(author);
+      if (label && !badge) {
         author.querySelectorAll('.j7zh-user-label').forEach((old) => old.remove());
         badge = document.createElement('span');
         badge.className = 'j7zh-user-label';
         badge.dataset.j7zhUser = key;
-        badge.title = '@' + row.twitterUsername + ' · Frontrun position';
-        const target = labelTarget(author);
         if (target) target.insertAdjacentElement('afterend', badge);
         else author.appendChild(badge);
       }
-      if (badge.textContent !== row.position) badge.textContent = row.position;
+      if (!label && badge) { badge.remove(); badge = null; }
+      if (badge) {
+        badge.title = '@' + username + (row && row.source === 'USER' ? ' · 用户自定义备注' : ' · Frontrun position');
+        if (badge.textContent !== label) badge.textContent = label;
+      }
+      if (!edit) {
+        author.querySelectorAll('.j7zh-label-edit').forEach((old) => old.remove());
+        edit = document.createElement('span');
+        edit.className = 'j7zh-label-edit';
+        edit.dataset.j7zhUser = key;
+        edit.setAttribute('role', 'button');
+        edit.setAttribute('tabindex', '0');
+        edit.setAttribute('aria-label', '编辑 @' + username + ' 的备注');
+        edit.title = '编辑备注';
+        edit.textContent = '✎';
+        const after = badge || target;
+        if (after) after.insertAdjacentElement('afterend', edit);
+        else author.appendChild(edit);
+        const activate = (event) => {
+          if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault(); event.stopPropagation();
+          openQuickLabelEditor(username, edit);
+        };
+        edit.addEventListener('click', activate);
+        edit.addEventListener('keydown', activate);
+      }
+      if (LABELS.loaded && !LABELS.map.has(key)) queueMissingLabel(username);
     }
   }
 
-  function removeLabelBadges() { document.querySelectorAll('.j7zh-user-label').forEach((badge) => badge.remove()); }
+  function removeLabelBadges() {
+    document.querySelectorAll('.j7zh-user-label, .j7zh-label-edit').forEach((node) => node.remove());
+    closeQuickLabelEditor();
+    closeLabelManager();
+  }
   function applyLabels() {
     document.documentElement.classList.toggle('j7zh-labels', !!S.labels);
     if (!S.labels) { removeLabelBadges(); return; }
     if (LABELS.loaded) scanLabels(document.body);
     else loadLabelState().catch(() => null);
+  }
+
+  const LABEL_MANAGER_PAGE_SIZE = 40;
+
+  function closeLabelManager() {
+    const manager = document.getElementById('j7zh-label-manager');
+    if (manager) manager.remove();
+  }
+
+  function filteredManagerRows(query) {
+    const q = String(query || '').trim().toLowerCase();
+    return [...LABELS.map.values()].filter((row) => {
+      const visible = !!displayLabel(row) || row.source === 'USER';
+      if (!q) return visible;
+      return row.twitterUsername.toLowerCase().includes(q) ||
+        String(row.position || '').toLowerCase().includes(q) ||
+        String(row.frontrunPosition || '').toLowerCase().includes(q);
+    }).sort((a, b) => {
+      if ((a.source === 'USER') !== (b.source === 'USER')) return a.source === 'USER' ? -1 : 1;
+      return a.twitterUsername.localeCompare(b.twitterUsername);
+    });
+  }
+
+  function renderLabelManager() {
+    const manager = document.getElementById('j7zh-label-manager');
+    if (!manager) return;
+    const search = manager.querySelector('#j7zh-label-manager-search');
+    const rows = filteredManagerRows(search && search.value);
+    const pages = Math.max(1, Math.ceil(rows.length / LABEL_MANAGER_PAGE_SIZE));
+    let page = Math.max(0, Math.min(pages - 1, Number(manager.dataset.page) || 0));
+    manager.dataset.page = String(page);
+    const list = manager.querySelector('.j7zh-label-manager-list');
+    list.innerHTML = '';
+    for (const row of rows.slice(page * LABEL_MANAGER_PAGE_SIZE, (page + 1) * LABEL_MANAGER_PAGE_SIZE)) {
+      const item = document.createElement('div');
+      item.className = 'j7zh-label-manager-item';
+      item.dataset.username = row.twitterUsername;
+      const head = document.createElement('div');
+      head.className = 'j7zh-label-manager-head';
+      const name = document.createElement('b');
+      name.textContent = '@' + row.twitterUsername;
+      const source = document.createElement('span');
+      source.className = 'j7zh-label-source ' + (row.source === 'USER' ? 'is-user' : 'is-frontrun');
+      source.textContent = row.source === 'USER' ? 'USER' : 'FRONTRUN';
+      head.append(name, source);
+      if (row.hidden === true) {
+        const hidden = document.createElement('span');
+        hidden.className = 'j7zh-label-hidden';
+        hidden.textContent = '已隐藏';
+        head.appendChild(hidden);
+      }
+      const line = document.createElement('div');
+      line.className = 'j7zh-label-manager-edit';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.maxLength = 100;
+      input.value = displayLabel(row);
+      input.placeholder = '输入备注';
+      line.appendChild(input);
+      for (const action of [['save', '保存'], ['delete', '删除'], ['restore', '恢复 Frontrun']]) {
+        if (action[0] === 'restore' && row.source !== 'USER') continue;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.action = action[0];
+        button.textContent = action[1];
+        line.appendChild(button);
+      }
+      item.append(head, line);
+      if (row.source === 'USER' && row.frontrunPosition) {
+        const original = document.createElement('small');
+        original.textContent = '原 Frontrun：' + row.frontrunPosition;
+        item.appendChild(original);
+      }
+      list.appendChild(item);
+    }
+    if (!rows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'j7zh-label-manager-empty';
+      empty.textContent = '没有匹配的备注';
+      list.appendChild(empty);
+    }
+    manager.querySelector('.j7zh-label-manager-count').textContent = '共 ' + rows.length + ' 条 · 第 ' + (page + 1) + ' / ' + pages + ' 页';
+    manager.querySelector('[data-page="prev"]').disabled = page <= 0;
+    manager.querySelector('[data-page="next"]').disabled = page >= pages - 1;
+  }
+
+  function openLabelManager() {
+    closeLabelManager();
+    const manager = document.createElement('div');
+    manager.id = 'j7zh-label-manager';
+    manager.className = 'j7zh-label-manager';
+    manager.dataset.page = '0';
+    manager.innerHTML = '<div class="j7zh-label-manager-dialog"><div class="j7zh-label-manager-title"><b>编辑 Twitter 备注</b><button type="button" data-close>×</button></div><div class="j7zh-label-manager-add"><input id="j7zh-label-manager-username" type="text" placeholder="username"><input id="j7zh-label-manager-new-label" type="text" maxlength="100" placeholder="新增自定义备注"><button type="button" data-add>新增 / 保存</button></div><input id="j7zh-label-manager-search" type="search" placeholder="搜索 username 或备注"><div class="j7zh-label-manager-list"></div><div class="j7zh-label-manager-pages"><button type="button" data-page="prev">上一页</button><span class="j7zh-label-manager-count"></span><button type="button" data-page="next">下一页</button></div></div>';
+    document.body.appendChild(manager);
+    manager.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (event.target === manager || event.target.closest('[data-close]')) { closeLabelManager(); return; }
+      const pageButton = event.target.closest('button[data-page]');
+      if (pageButton) {
+        manager.dataset.page = String((Number(manager.dataset.page) || 0) + (pageButton.dataset.page === 'next' ? 1 : -1));
+        renderLabelManager();
+        return;
+      }
+      if (event.target.closest('[data-add]')) {
+        const username = manager.querySelector('#j7zh-label-manager-username').value;
+        const value = manager.querySelector('#j7zh-label-manager-new-label').value;
+        try {
+          await commitLocalLabel(username, 'save', value);
+          manager.querySelector('#j7zh-label-manager-username').value = '';
+          manager.querySelector('#j7zh-label-manager-new-label').value = '';
+          LABELS.status = '已新增用户备注';
+          renderLabelPanelState();
+        } catch (error) { LABELS.status = '保存失败：' + error.message; renderLabelPanelState(); }
+        return;
+      }
+      const actionButton = event.target.closest('button[data-action]');
+      const item = actionButton && actionButton.closest('.j7zh-label-manager-item');
+      if (!actionButton || !item) return;
+      try {
+        await commitLocalLabel(item.dataset.username, actionButton.dataset.action, item.querySelector('input').value);
+        LABELS.status = actionButton.dataset.action === 'save' ? '备注已保存' : actionButton.dataset.action === 'delete' ? '备注已删除并隐藏' : '已恢复 Frontrun 备注';
+        renderLabelPanelState();
+      } catch (error) { LABELS.status = '操作失败：' + error.message; renderLabelPanelState(); }
+    });
+    manager.querySelector('#j7zh-label-manager-search').addEventListener('input', () => { manager.dataset.page = '0'; renderLabelManager(); });
+    manager.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeLabelManager(); });
+    renderLabelManager();
+    setTimeout(() => manager.querySelector('#j7zh-label-manager-search').focus(), 0);
   }
 
   function labelStatusText() {
@@ -798,7 +1022,7 @@
     if (job.phase === 'error' && job.error) return '更新失败：' + job.error;
     if (job.phase === 'done') return '全部更新完成：' + (job.total || LABELS.count) + ' 个 username';
     if (LABELS.status) return LABELS.status;
-    let text = '标签 ' + LABELS.count + ' 条，有备注 ' + LABELS.nonEmpty + ' 条；Cookie ' + (LABELS.configSaved ? '已保存' : '未保存');
+    let text = '标签 ' + LABELS.count + ' 条，有备注 ' + LABELS.nonEmpty + ' 条（用户 ' + LABELS.localCount + '）；Cookie ' + (LABELS.configSaved ? '已保存' : '未保存');
     if (LABELS.rate && LABELS.rate.minuteRemaining != null) text += '；分钟余量 ' + LABELS.rate.minuteRemaining;
     return text;
   }
@@ -821,7 +1045,7 @@
 
   function labelPanelHtml() {
     return '<div class="j7zh-label-panel" id="j7zh-label-panel"' + (S.labels ? '' : ' hidden') + '>' +
-      '<div class="j7zh-label-actions"><button type="button" id="j7zh-label-import">导入</button><button type="button" id="j7zh-label-export">导出</button><input id="j7zh-label-file" type="file" accept="application/json,.json" hidden></div>' +
+      '<div class="j7zh-label-actions"><button type="button" id="j7zh-label-import">导入</button><button type="button" id="j7zh-label-export">导出</button><button type="button" id="j7zh-label-manage">编辑备注</button><input id="j7zh-label-file" type="file" accept="application/json,.json" hidden></div>' +
       '<div class="j7zh-label-config"><b>从 Frontrun 更新</b><textarea id="j7zh-label-curl" rows="4" autocomplete="off" spellcheck="false" placeholder="粘贴完整 curl 命令；保存后输入框会清空，Cookie 不会进入导出文件"></textarea><button type="button" id="j7zh-label-save-cookie">保存 Cookie</button></div>' +
       '<label class="j7zh-row j7zh-label-auto-row"><input type="checkbox" id="j7zh-label-auto"><span class="j7zh-sw"></span><span class="j7zh-txt"><b>更新无记录博主</b><small>刷到本地没有记录的 username 时，低频向 Frontrun 补全并保存</small></span></label>' +
       '<button type="button" class="j7zh-label-update-all" id="j7zh-label-update-all">全部更新</button>' +
@@ -830,7 +1054,7 @@
   }
 
   function downloadLabelRows(rows) {
-    const payload = { version: 1, exportedAt: new Date().toISOString(), data: LU.normalizeRows(rows) };
+    const payload = { version: 2, exportedAt: new Date().toISOString(), data: LU.normalizeRows(rows) };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -846,12 +1070,14 @@
   function wireLabelPanel(menu) {
     const importButton = menu.querySelector('#j7zh-label-import');
     const exportButton = menu.querySelector('#j7zh-label-export');
+    const manageButton = menu.querySelector('#j7zh-label-manage');
     const fileInput = menu.querySelector('#j7zh-label-file');
     const saveButton = menu.querySelector('#j7zh-label-save-cookie');
     const updateButton = menu.querySelector('#j7zh-label-update-all');
     const curlInput = menu.querySelector('#j7zh-label-curl');
 
     importButton.addEventListener('click', () => fileInput.click());
+    manageButton.addEventListener('click', openLabelManager);
     fileInput.addEventListener('change', async () => {
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
@@ -974,7 +1200,7 @@
 
   function toggleMenu() {
     let m = document.getElementById('j7zh-menu');
-    if (m) { m.remove(); return; }
+    if (m) { m.remove(); closeQuickLabelEditor(); closeLabelManager(); return; }
     m = document.createElement('div');
     m.id = 'j7zh-menu';
     m.innerHTML = [
@@ -1036,8 +1262,10 @@
     const close = (ev) => {
       const mm = document.getElementById('j7zh-menu');
       if (!mm) { document.removeEventListener('pointerdown', close, true); document.removeEventListener('keydown', close, true); return; }
-      if (ev.type === 'keydown') { if (ev.key !== 'Escape') return; }
-      else if (mm.contains(ev.target) || (ev.target.closest && ev.target.closest('#j7zh-toggle'))) return;
+      if (ev.type === 'keydown') {
+        if (ev.key !== 'Escape') return;
+        if (document.getElementById('j7zh-label-manager') || document.getElementById('j7zh-label-editor')) return;
+      } else if (mm.contains(ev.target) || (ev.target.closest && ev.target.closest('#j7zh-toggle, .j7zh-label-manager, .j7zh-label-editor'))) return;
       mm.remove();
       document.removeEventListener('pointerdown', close, true);
       document.removeEventListener('keydown', close, true);
@@ -1047,7 +1275,7 @@
 
   /* ---------- 启动 ---------- */
   // 调试钩子（控制台可用 __j7zh.walk(document.body) 手动补扫，__j7zh.scan() 重扫翻译）
-  window.__j7zh = { walk, lookup, settings: S, version: '1.6.0', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
+  window.__j7zh = { walk, lookup, settings: S, version: '1.7.0', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
 
   document.addEventListener('pointerdown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
   document.addEventListener('keydown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
