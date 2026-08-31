@@ -110,6 +110,7 @@ const LABEL = self.J7ZhLabels;
 const LABEL_DATA_KEY = 'j7zh_twitter_labels_v1';
 const LABEL_CONFIG_KEY = 'j7zh_frontrun_config_v1';
 const LABEL_AUTO_KEY = 'j7zh_label_auto_update_v1';
+const LABEL_EMPTY_TTL_KEY = 'j7zh_label_empty_ttl_hours_v1';
 const LABEL_SEED_FILE = 'twitter-labels.seed.json';
 const LABEL_BATCH_SIZE = 30;
 
@@ -155,8 +156,12 @@ function mergeProviderLabel(row) {
   const key = row.twitterUsername.toLowerCase();
   const existing = labelMap.get(key);
   row.source = 'FRONTRUN';
+  if (row.position) delete row.frontrunCheckedAt;
+  else row.frontrunCheckedAt = Date.now();
   if (existing && existing.source === 'USER') {
     existing.frontrunPosition = row.position || '';
+    if (row.frontrunCheckedAt) existing.frontrunCheckedAt = row.frontrunCheckedAt;
+    else delete existing.frontrunCheckedAt;
     labelMap.set(key, existing);
     return existing;
   }
@@ -202,7 +207,7 @@ async function saveFrontrunConfig(command) {
 
 async function publicLabelState() {
   const rows = await ensureLabelRows();
-  const stored = await storageGet([LABEL_CONFIG_KEY, LABEL_AUTO_KEY]);
+  const stored = await storageGet([LABEL_CONFIG_KEY, LABEL_AUTO_KEY, LABEL_EMPTY_TTL_KEY]);
   return {
     count: rows.length,
     nonEmpty: rows.filter((row) => LABEL.effectiveLabel(row)).length,
@@ -210,6 +215,7 @@ async function publicLabelState() {
     configSaved: !!stored[LABEL_CONFIG_KEY],
     configSavedAt: stored[LABEL_CONFIG_KEY] && stored[LABEL_CONFIG_KEY].savedAt || '',
     autoUpdate: stored[LABEL_AUTO_KEY] === true,
+    emptyTtlHours: LABEL.normalizeEmptyTtlHours(stored[LABEL_EMPTY_TTL_KEY]),
     job: Object.assign({}, labelJob),
     rate: labelRate
   };
@@ -307,7 +313,8 @@ async function queryAndMergeLabels(usernames, options) {
     const key = name.toLowerCase();
     if (!name || seen.has(key)) return false;
     seen.add(key);
-    return !(options && options.missingOnly && labelMap.has(key));
+    if (!(options && options.missingOnly)) return true;
+    return LABEL.shouldRefreshEmpty(labelMap.get(key), options.emptyTtlHours);
   });
   if (!names.length) return [];
 
@@ -400,10 +407,11 @@ async function updateLocalLabel(username, action, value) {
 }
 
 async function queryMissingLabels(usernames) {
-  const stored = await storageGet([LABEL_AUTO_KEY, LABEL_CONFIG_KEY]);
+  const stored = await storageGet([LABEL_AUTO_KEY, LABEL_CONFIG_KEY, LABEL_EMPTY_TTL_KEY]);
   if (stored[LABEL_AUTO_KEY] !== true) return { skipped: 'disabled', rows: [] };
   if (!stored[LABEL_CONFIG_KEY]) return { skipped: 'no-config', rows: [] };
-  const rows = await enqueueLabelTask(() => queryAndMergeLabels(usernames, { missingOnly: true }));
+  const emptyTtlHours = LABEL.normalizeEmptyTtlHours(stored[LABEL_EMPTY_TTL_KEY]);
+  const rows = await enqueueLabelTask(() => queryAndMergeLabels(usernames, { missingOnly: true, emptyTtlHours }));
   return { rows, state: await publicLabelState() };
 }
 
@@ -437,6 +445,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { config: await saveFrontrunConfig(String(msg.command || '')), state: await publicLabelState() };
       case 'j7zh-label-auto-set':
         await storageSet({ [LABEL_AUTO_KEY]: msg.enabled === true });
+        return { state: await publicLabelState() };
+      case 'j7zh-label-ttl-set':
+        await storageSet({ [LABEL_EMPTY_TTL_KEY]: LABEL.normalizeEmptyTtlHours(msg.hours) });
         return { state: await publicLabelState() };
       case 'j7zh-label-query-missing':
         return queryMissingLabels(Array.isArray(msg.usernames) ? msg.usernames : []);

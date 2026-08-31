@@ -9,6 +9,8 @@
 
   const ENDPOINT = 'https://loadbalance.frontrun.pro/api/v2/twitter/info/batch-query-light';
   const USERNAME_RE = /^[A-Za-z0-9_]{1,50}$/;
+  const DEFAULT_EMPTY_TTL_HOURS = 24;
+  const MAX_EMPTY_TTL_HOURS = 8760;
 
   function normalizeUsername(value) {
     let text = String(value == null ? '' : value).trim();
@@ -42,6 +44,8 @@
       const key = twitterUsername.toLowerCase();
       if (byName.has(key)) byName.delete(key);
       const row = { twitterUsername, position, source };
+      const checkedAt = typeof item === 'object' && item ? Number(item.frontrunCheckedAt) : NaN;
+      if (Number.isFinite(checkedAt) && checkedAt > 0) row.frontrunCheckedAt = Math.floor(checkedAt);
       if (source === 'USER') {
         const provider = legacyOverride ? rawPosition : (typeof item.frontrunPosition === 'string' ? item.frontrunPosition.trim() : '');
         if (provider) row.frontrunPosition = provider;
@@ -60,6 +64,8 @@
     return [...map.values()].map((row) => {
       const source = row.source === 'USER' ? 'USER' : 'FRONTRUN';
       const out = { twitterUsername: row.twitterUsername, position: row.position || '', source };
+      const checkedAt = Number(row.frontrunCheckedAt);
+      if (Number.isFinite(checkedAt) && checkedAt > 0) out.frontrunCheckedAt = Math.floor(checkedAt);
       if (source === 'USER') {
         if (row.frontrunPosition) out.frontrunPosition = row.frontrunPosition;
         if (row.hidden === true || !row.position) out.hidden = true;
@@ -71,6 +77,22 @@
   function effectiveLabel(row) {
     if (!row) return '';
     return row.hidden === true ? '' : String(row.position || '').trim();
+  }
+
+  function normalizeEmptyTtlHours(value) {
+    if (value == null || String(value).trim() === '') return DEFAULT_EMPTY_TTL_HOURS;
+    const hours = Number(value);
+    if (!Number.isFinite(hours)) return DEFAULT_EMPTY_TTL_HOURS;
+    return Math.min(MAX_EMPTY_TTL_HOURS, Math.max(1, Math.round(hours)));
+  }
+
+  function shouldRefreshEmpty(row, ttlHours, now) {
+    if (!row) return true;
+    if (row.source === 'USER' || effectiveLabel(row)) return false;
+    const checkedAt = Number(row.frontrunCheckedAt);
+    if (!Number.isFinite(checkedAt) || checkedAt <= 0) return true;
+    const current = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    return current - checkedAt >= normalizeEmptyTtlHours(ttlHours) * 60 * 60 * 1000;
   }
 
   function chunk(values, size) {
@@ -143,11 +165,14 @@
 
   return {
     ENDPOINT,
+    DEFAULT_EMPTY_TTL_HOURS,
     normalizeUsername,
     normalizeRows,
     rowsToMap,
     mapToRows,
     effectiveLabel,
+    normalizeEmptyTtlHours,
+    shouldRefreshEmpty,
     chunk,
     parseCookieHeader,
     parseCurlCommand,

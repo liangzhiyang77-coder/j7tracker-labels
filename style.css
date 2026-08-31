@@ -299,10 +299,29 @@ html.j7zh-reader .profile-card { max-width: 520px !important; }
 }
 #j7zh-menu .j7zh-label-config textarea:focus { border-color: rgba(129,140,248,.75); }
 #j7zh-menu .j7zh-label-config button { grid-column: 2; justify-self: end; }
-#j7zh-menu .j7zh-label-auto-row { margin: 3px -4px; padding: 5px 4px; }
+#j7zh-menu .j7zh-label-auto-row { align-items: center; margin: 3px -4px; padding: 5px 4px; cursor: default; }
+#j7zh-menu .j7zh-label-auto-toggle { display: flex; flex: 1 1 auto; min-width: 0; align-items: flex-start; gap: 10px; cursor: pointer; }
 #j7zh-menu .j7zh-label-auto-row .j7zh-sw { width: 30px; height: 18px; }
 #j7zh-menu .j7zh-label-auto-row .j7zh-sw::after { width: 14px; height: 14px; }
 #j7zh-menu .j7zh-label-auto-row input:checked + .j7zh-sw::after { left: 14px; }
+#j7zh-menu .j7zh-label-auto-row .j7zh-txt { min-width: 0; }
+#j7zh-menu .j7zh-label-ttl { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-left: 6px; color: rgba(209,213,219,.7); font-size: 10px; }
+#j7zh-menu .j7zh-label-ttl input {
+  position: static;
+  opacity: 1;
+  box-sizing: border-box;
+  width: 54px;
+  height: 27px;
+  border: 1px solid rgba(129,140,248,.45);
+  border-radius: 6px;
+  background: rgba(0,0,0,.24);
+  color: #e5e7eb;
+  padding: 3px 4px;
+  text-align: center;
+  font: 600 11px/1 system-ui, sans-serif;
+  outline: none;
+}
+#j7zh-menu .j7zh-label-ttl input:focus { border-color: rgba(129,140,248,.9); }
 #j7zh-menu .j7zh-label-update-all { width: 100%; margin-top: 5px; }
 #j7zh-menu .j7zh-label-status { color: rgba(199,210,254,.72); line-height: 1.45; overflow-wrap: anywhere; }
 

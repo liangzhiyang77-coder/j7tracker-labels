@@ -655,6 +655,7 @@
     loaded: false,
     loading: null,
     autoUpdate: false,
+    emptyTtlHours: LU ? LU.DEFAULT_EMPTY_TTL_HOURS : 24,
     configSaved: false,
     count: 0,
     nonEmpty: 0,
@@ -692,6 +693,7 @@
   function applyPublicLabelState(state) {
     if (!state) return;
     LABELS.autoUpdate = state.autoUpdate === true;
+    LABELS.emptyTtlHours = LU ? LU.normalizeEmptyTtlHours(state.emptyTtlHours) : 24;
     LABELS.configSaved = state.configSaved === true;
     LABELS.count = Number(state.count) || LABELS.map.size;
     LABELS.nonEmpty = Number(state.nonEmpty) || 0;
@@ -872,7 +874,7 @@
         edit.addEventListener('click', activate);
         edit.addEventListener('keydown', activate);
       }
-      if (LABELS.loaded && !LABELS.map.has(key)) queueMissingLabel(username);
+      if (LABELS.loaded && LU.shouldRefreshEmpty(row, LABELS.emptyTtlHours)) queueMissingLabel(username);
     }
   }
 
@@ -1022,7 +1024,7 @@
     if (job.phase === 'error' && job.error) return '更新失败：' + job.error;
     if (job.phase === 'done') return '全部更新完成：' + (job.total || LABELS.count) + ' 个 username';
     if (LABELS.status) return LABELS.status;
-    let text = '标签 ' + LABELS.count + ' 条，有备注 ' + LABELS.nonEmpty + ' 条（用户 ' + LABELS.localCount + '）；Cookie ' + (LABELS.configSaved ? '已保存' : '未保存');
+    let text = '标签 ' + LABELS.count + ' 条，有备注 ' + LABELS.nonEmpty + ' 条（用户 ' + LABELS.localCount + '）；空结果 TTL ' + LABELS.emptyTtlHours + ' 小时；Cookie ' + (LABELS.configSaved ? '已保存' : '未保存');
     if (LABELS.rate && LABELS.rate.minuteRemaining != null) text += '；分钟余量 ' + LABELS.rate.minuteRemaining;
     return text;
   }
@@ -1034,6 +1036,8 @@
     if (status) textContentSafe(status, labelStatusText());
     const auto = document.getElementById('j7zh-label-auto');
     if (auto) auto.checked = LABELS.autoUpdate;
+    const ttl = document.getElementById('j7zh-label-empty-ttl');
+    if (ttl && document.activeElement !== ttl) ttl.value = String(LABELS.emptyTtlHours);
     const update = document.getElementById('j7zh-label-update-all');
     if (update) {
       update.disabled = !!LABELS.job.busy || !LABELS.configSaved;
@@ -1047,7 +1051,7 @@
     return '<div class="j7zh-label-panel" id="j7zh-label-panel"' + (S.labels ? '' : ' hidden') + '>' +
       '<div class="j7zh-label-actions"><button type="button" id="j7zh-label-import">导入</button><button type="button" id="j7zh-label-export">导出</button><button type="button" id="j7zh-label-manage">编辑备注</button><input id="j7zh-label-file" type="file" accept="application/json,.json" hidden></div>' +
       '<div class="j7zh-label-config"><b>从 Frontrun 更新</b><textarea id="j7zh-label-curl" rows="4" autocomplete="off" spellcheck="false" placeholder="粘贴完整 curl 命令；保存后输入框会清空，Cookie 不会进入导出文件"></textarea><button type="button" id="j7zh-label-save-cookie">保存 Cookie</button></div>' +
-      '<label class="j7zh-row j7zh-label-auto-row"><input type="checkbox" id="j7zh-label-auto"><span class="j7zh-sw"></span><span class="j7zh-txt"><b>更新无记录博主</b><small>刷到本地没有记录的 username 时，低频向 Frontrun 补全并保存</small></span></label>' +
+      '<div class="j7zh-row j7zh-label-auto-row"><label class="j7zh-label-auto-toggle"><input type="checkbox" id="j7zh-label-auto"><span class="j7zh-sw"></span><span class="j7zh-txt"><b>更新无记录博主</b><small>无备注结果在 TTL 内不重复请求 Frontrun</small></span></label><label class="j7zh-label-ttl"><input type="number" id="j7zh-label-empty-ttl" min="1" max="8760" step="1" inputmode="numeric" aria-label="空结果缓存小时数"><span>小时</span></label></div>' +
       '<button type="button" class="j7zh-label-update-all" id="j7zh-label-update-all">全部更新</button>' +
       '<div class="j7zh-menu-foot j7zh-label-status" id="j7zh-label-status"></div>' +
     '</div>';
@@ -1235,6 +1239,15 @@
         }).catch((error) => { LABELS.status = '设置失败：' + error.message; renderLabelPanelState(); });
         return;
       }
+      if (inp && inp.id === 'j7zh-label-empty-ttl') {
+        const hours = LU.normalizeEmptyTtlHours(inp.value);
+        inp.value = String(hours);
+        sendLabelMessage({ type: 'j7zh-label-ttl-set', hours }).then((result) => {
+          LABELS.status = '空结果缓存时间已设为 ' + hours + ' 小时';
+          applyPublicLabelState(result.state);
+        }).catch((error) => { LABELS.status = '设置失败：' + error.message; renderLabelPanelState(); });
+        return;
+      }
       if (inp && inp.id === 'j7zh-engine') {
         S.engine = inp.value; try { localStorage.setItem(LS.engine, S.engine); } catch (err) {}
         // 换引擎：清掉已有译文重翻，方便对比
@@ -1275,7 +1288,7 @@
 
   /* ---------- 启动 ---------- */
   // 调试钩子（控制台可用 __j7zh.walk(document.body) 手动补扫，__j7zh.scan() 重扫翻译）
-  window.__j7zh = { walk, lookup, settings: S, version: '1.7.0', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
+  window.__j7zh = { walk, lookup, settings: S, version: '1.7.1', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
 
   document.addEventListener('pointerdown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
   document.addEventListener('keydown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);

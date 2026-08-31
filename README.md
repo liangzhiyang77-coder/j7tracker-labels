@@ -43,7 +43,8 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 3. 「导入」接受 JSON 数组，或含 `data` / `rows` / `labels` 数组的对象；每条记录使用 `twitterUsername`、`position` 和 `source`。同名账号不区分大小写；用户备注优先于导入的 Frontrun 备注，其余同来源记录覆盖同名并保留其他记录。
 4. 「导出」保存当前全部标签及来源，但不会包含 Cookie 或 Frontrun 请求配置。
 5. 如需联网更新，从 DevTools 复制 Frontrun `batch-query-light` 请求的完整 cURL，粘贴后点「保存 Cookie」。输入框随后清空。
-6. 「更新无记录博主」只在刷到本地完全没有该 username 时补查；「全部更新」按每批最多 30 个、串行随机间隔刷新当前全部账号。面板会显示进度和接口剩余额度。
+6. 「更新无记录博主」会补查本地没有备注的 username。Frontrun 也没有备注时会记录本次查询时间，在可配置的空结果 TTL 内不再重复请求（默认 24 小时，范围 1–8760 小时）；TTL 到期且再次刷到该账号时才重新查询。
+7. 「全部更新」按每批最多 30 个、串行随机间隔刷新当前全部账号。面板会显示进度和接口剩余额度。
 
 数据示例：
 
@@ -53,6 +54,8 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 ```
 
 删除 Frontrun 备注时会保存为 `source: "USER"` 和 `hidden: true`，所以刷新或全部更新后不会自动重新出现。自定义备注保存在当前浏览器的 `chrome.storage.local` 中。
+
+Frontrun 空结果会额外保存 `frontrunCheckedAt`（毫秒时间戳），用于计算上述 TTL；这不会改变备注的 `source`。
 
 Frontrun Cookie 只保存在 `chrome.storage.local` 和目标域 Cookie 存储中。Cookie 失效后重新粘贴并保存新的 cURL 即可。
 
