@@ -42,9 +42,10 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 2. 菜单中的「编辑备注」提供集中管理：搜索、新增、修改、删除（隐藏）和恢复 Frontrun 备注。
 3. 「导入」接受 JSON 数组，或含 `data` / `rows` / `labels` 数组的对象；每条记录使用 `twitterUsername`、`position` 和 `source`。同名账号不区分大小写；用户备注优先于导入的 Frontrun 备注，其余同来源记录覆盖同名并保留其他记录。
 4. 「导出」保存当前全部标签及来源，但不会包含 Cookie 或 Frontrun 请求配置。
-5. 如需联网更新，从 DevTools 复制 Frontrun `batch-query-light` 请求的完整 cURL，粘贴后点「保存 Cookie」。输入框随后清空。
-6. 「更新无记录博主」会补查本地没有备注的 username。Frontrun 也没有备注时会记录本次查询时间，在可配置的空结果 TTL 内不再重复请求（默认 24 小时，范围 1–8760 小时）；TTL 到期且再次刷到该账号时才重新查询。
-7. 「全部更新」按每批最多 30 个、串行随机间隔刷新当前全部账号。面板会显示进度和接口剩余额度。
+5. 如需联网更新，从 DevTools 复制 Frontrun `batch-query-light` 请求的完整 cURL。首次点「保存 Cookie」，以后可粘贴新 cURL 点「覆盖 Cookie」，也可点「清除 Cookie」同时移除本地配置和该配置写入的目标域 Cookie。输入框保存后会清空。
+6. 「更新无记录博主」会先在页面本地收集 username，从发现第一条开始随机等待 5–10 秒，再合并成批量请求（同名去重、每批最多 20 个），不会按每条推文单独请求。面板会显示待批量数量和自动累计更新数量。
+7. Frontrun 也没有备注时会记录本次查询时间，在可配置的空结果 TTL 内不再重复请求（默认 24 小时，范围 1–8760 小时）；TTL 到期且再次刷到该账号时才重新查询。遇到 500 服务器错误时自动补查会冷却 5 分钟，避免循环请求。
+8. 「全部更新」按每批最多 20 个、串行随机间隔刷新当前全部账号。面板会显示进度和接口剩余额度。
 
 数据示例：
 
@@ -57,7 +58,7 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 
 Frontrun 空结果会额外保存 `frontrunCheckedAt`（毫秒时间戳），用于计算上述 TTL；这不会改变备注的 `source`。
 
-Frontrun Cookie 只保存在 `chrome.storage.local` 和目标域 Cookie 存储中。Cookie 失效后重新粘贴并保存新的 cURL 即可。
+Frontrun Cookie 只保存在 `chrome.storage.local` 和目标域 Cookie 存储中，不会进入标签 JSON 或导出文件。Cookie 失效后可覆盖为新的 cURL，也可随时清除。
 
 ## 翻译引擎
 

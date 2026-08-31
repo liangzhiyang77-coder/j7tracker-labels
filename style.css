@@ -332,7 +332,7 @@ html.j7zh-reader .profile-card { max-width: 520px !important; }
   outline: none;
 }
 #j7zh-menu .j7zh-label-config textarea:focus { border-color: rgba(129,140,248,.75); }
-#j7zh-menu .j7zh-label-config button { grid-column: 2; justify-self: end; }
+#j7zh-menu .j7zh-label-config-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 6px; }
 #j7zh-menu .j7zh-label-auto-row { align-items: center; margin: 3px -4px; padding: 5px 4px; cursor: default; }
 #j7zh-menu .j7zh-label-auto-toggle { display: flex; flex: 1 1 auto; min-width: 0; align-items: flex-start; gap: 10px; cursor: pointer; }
 #j7zh-menu .j7zh-label-auto-row .j7zh-sw { width: 30px; height: 18px; }

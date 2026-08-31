@@ -657,17 +657,23 @@
     autoUpdate: false,
     emptyTtlHours: LU ? LU.DEFAULT_EMPTY_TTL_HOURS : 24,
     configSaved: false,
+    autoUpdatedCount: 0,
+    autoPauseUntil: 0,
+    autoLastError: '',
     count: 0,
     nonEmpty: 0,
     localCount: 0,
     job: { busy: false, phase: 'idle', current: 0, total: 0, updated: 0, error: '' },
     rate: null,
-    missing: new Set(),
+    missing: new Map(),
     pending: new Set(),
     missingTimer: null,
+    batchDueAt: 0,
     status: ''
   };
   const AUTHOR_SEL = '.tweet-author, .quoted-author, .nested-quoted-author, .pinned-tweet-author';
+  const LABEL_AUTO_BATCH_MIN_MS = 5000;
+  const LABEL_AUTO_BATCH_MAX_MS = 10000;
 
   function sendLabelMessage(message) {
     return new Promise((resolve, reject) => {
@@ -695,6 +701,9 @@
     LABELS.autoUpdate = state.autoUpdate === true;
     LABELS.emptyTtlHours = LU ? LU.normalizeEmptyTtlHours(state.emptyTtlHours) : 24;
     LABELS.configSaved = state.configSaved === true;
+    LABELS.autoUpdatedCount = Math.max(0, Math.floor(Number(state.autoUpdatedCount) || 0));
+    LABELS.autoPauseUntil = Math.max(0, Number(state.autoPauseUntil) || 0);
+    LABELS.autoLastError = String(state.autoLastError || '');
     LABELS.count = Number(state.count) || LABELS.map.size;
     LABELS.nonEmpty = Number(state.nonEmpty) || 0;
     LABELS.localCount = Number(state.localCount) || 0;
@@ -857,25 +866,46 @@
 
   function queueMissingLabel(username) {
     if (!LABELS.autoUpdate || !LABELS.configSaved || !username) return;
+    if (LABELS.autoPauseUntil > Date.now()) return;
     const key = username.toLowerCase();
     if (LABELS.pending.has(key)) return;
-    LABELS.missing.add(username);
+    const before = LABELS.missing.size;
+    LABELS.missing.set(key, username);
+    if (LABELS.missing.size !== before) renderLabelPanelState();
     if (LABELS.missingTimer) return;
+    const waitMs = LABEL_AUTO_BATCH_MIN_MS + Math.floor(Math.random() * (LABEL_AUTO_BATCH_MAX_MS - LABEL_AUTO_BATCH_MIN_MS + 1));
+    LABELS.batchDueAt = Date.now() + waitMs;
     LABELS.missingTimer = setTimeout(() => {
       LABELS.missingTimer = null;
-      const usernames = [...LABELS.missing];
+      LABELS.batchDueAt = 0;
+      const usernames = [...LABELS.missing.values()];
       LABELS.missing.clear();
       if (!usernames.length) return;
       usernames.forEach((name) => LABELS.pending.add(name.toLowerCase()));
+      renderLabelPanelState();
       sendLabelMessage({ type: 'j7zh-label-query-missing', usernames }).then((result) => {
         mergeLabelRows(result.rows || [], false);
         applyPublicLabelState(result.state);
+        if (result.warning) LABELS.status = result.warning;
+        else if ((result.rows || []).length) LABELS.status = '自动批量更新完成：本批 ' + result.rows.length + ' 个 username';
         scanLabels(document.body);
       }).catch((error) => {
         LABELS.status = error.message;
         renderLabelPanelState();
-      }).finally(() => { usernames.forEach((name) => LABELS.pending.delete(name.toLowerCase())); });
-    }, 1200);
+      }).finally(() => {
+        usernames.forEach((name) => LABELS.pending.delete(name.toLowerCase()));
+        renderLabelPanelState();
+      });
+    }, waitMs);
+  }
+
+  function clearMissingLabelQueue() {
+    if (LABELS.missingTimer) clearTimeout(LABELS.missingTimer);
+    LABELS.missingTimer = null;
+    LABELS.batchDueAt = 0;
+    LABELS.missing.clear();
+    LABELS.pending.clear();
+    renderLabelPanelState();
   }
 
   function scanLabels(root) {
@@ -1081,13 +1111,19 @@
 
   function labelStatusText() {
     const job = LABELS.job || {};
-    if (job.busy) return '全部更新中：' + (job.current || 0) + ' / ' + (job.total || LABELS.count) + '（已返回 ' + (job.updated || 0) + '）';
-    if (job.phase === 'error' && job.error) return '更新失败：' + job.error;
-    if (job.phase === 'done') return '全部更新完成：' + (job.total || LABELS.count) + ' 个 username';
-    if (LABELS.status) return LABELS.status;
-    let text = '标签 ' + LABELS.count + ' 条，有备注 ' + LABELS.nonEmpty + ' 条（用户 ' + LABELS.localCount + '）；空结果 TTL ' + LABELS.emptyTtlHours + ' 小时；Cookie ' + (LABELS.configSaved ? '已保存' : '未保存');
-    if (LABELS.rate && LABELS.rate.minuteRemaining != null) text += '；分钟余量 ' + LABELS.rate.minuteRemaining;
-    return text;
+    const queued = LABELS.missing.size + LABELS.pending.size;
+    let summary = '自动累计更新 ' + LABELS.autoUpdatedCount + ' 个；待批量 ' + queued + ' 个；Cookie ' + (LABELS.configSaved ? '已保存' : '未保存');
+    if (LABELS.batchDueAt > Date.now()) summary += '；约 ' + Math.ceil((LABELS.batchDueAt - Date.now()) / 1000) + ' 秒后发送';
+    if (LABELS.autoPauseUntil > Date.now()) summary += '；冷却剩余 ' + Math.ceil((LABELS.autoPauseUntil - Date.now()) / 60000) + ' 分钟';
+    if (LABELS.rate && LABELS.rate.minuteRemaining != null) summary += '；分钟余量 ' + LABELS.rate.minuteRemaining;
+    let detail = '';
+    if (job.busy) detail = '全部更新中：' + (job.current || 0) + ' / ' + (job.total || LABELS.count) + '（已返回 ' + (job.updated || 0) + '）';
+    else if (job.phase === 'error' && job.error) detail = '更新失败：' + job.error;
+    else if (job.phase === 'done') detail = '全部更新完成：' + (job.total || LABELS.count) + ' 个 username';
+    else if (LABELS.status) detail = LABELS.status;
+    else if (LABELS.autoPauseUntil > Date.now() && LABELS.autoLastError) detail = LABELS.autoLastError;
+    else detail = '标签 ' + LABELS.count + ' 条，有备注 ' + LABELS.nonEmpty + ' 条（用户 ' + LABELS.localCount + '）；空结果 TTL ' + LABELS.emptyTtlHours + ' 小时';
+    return detail + '；' + summary;
   }
 
   function renderLabelPanelState() {
@@ -1099,6 +1135,10 @@
     if (auto) auto.checked = LABELS.autoUpdate;
     const ttl = document.getElementById('j7zh-label-empty-ttl');
     if (ttl && document.activeElement !== ttl) ttl.value = String(LABELS.emptyTtlHours);
+    const saveCookie = document.getElementById('j7zh-label-save-cookie');
+    if (saveCookie) saveCookie.textContent = LABELS.configSaved ? '覆盖 Cookie' : '保存 Cookie';
+    const clearCookie = document.getElementById('j7zh-label-clear-cookie');
+    if (clearCookie) clearCookie.disabled = !LABELS.configSaved;
     const update = document.getElementById('j7zh-label-update-all');
     if (update) {
       update.disabled = !!LABELS.job.busy || !LABELS.configSaved;
@@ -1111,8 +1151,8 @@
   function labelPanelHtml() {
     return '<div class="j7zh-label-panel" id="j7zh-label-panel"' + (S.labels ? '' : ' hidden') + '>' +
       '<div class="j7zh-label-actions"><button type="button" id="j7zh-label-import">导入</button><button type="button" id="j7zh-label-export">导出</button><button type="button" id="j7zh-label-manage">编辑备注</button><input id="j7zh-label-file" type="file" accept="application/json,.json" hidden></div>' +
-      '<div class="j7zh-label-config"><b>从 Frontrun 更新</b><textarea id="j7zh-label-curl" rows="4" autocomplete="off" spellcheck="false" placeholder="粘贴完整 curl 命令；保存后输入框会清空，Cookie 不会进入导出文件"></textarea><button type="button" id="j7zh-label-save-cookie">保存 Cookie</button></div>' +
-      '<div class="j7zh-row j7zh-label-auto-row"><label class="j7zh-label-auto-toggle"><input type="checkbox" id="j7zh-label-auto"><span class="j7zh-sw"></span><span class="j7zh-txt"><b>更新无记录博主</b><small>无备注结果在 TTL 内不重复请求 Frontrun</small></span></label><label class="j7zh-label-ttl"><input type="number" id="j7zh-label-empty-ttl" min="1" max="8760" step="1" inputmode="numeric" aria-label="空结果缓存小时数"><span>小时</span></label></div>' +
+      '<div class="j7zh-label-config"><b>从 Frontrun 更新</b><textarea id="j7zh-label-curl" rows="4" autocomplete="off" spellcheck="false" placeholder="粘贴完整 curl 命令；可保存或覆盖，Cookie 不会进入导出文件"></textarea><div class="j7zh-label-config-actions"><button type="button" id="j7zh-label-save-cookie">保存 Cookie</button><button type="button" id="j7zh-label-clear-cookie">清除 Cookie</button></div></div>' +
+      '<div class="j7zh-row j7zh-label-auto-row"><label class="j7zh-label-auto-toggle"><input type="checkbox" id="j7zh-label-auto"><span class="j7zh-sw"></span><span class="j7zh-txt"><b>更新无记录博主</b><small>收集 5–10 秒后批量请求；空结果在 TTL 内不重复请求</small></span></label><label class="j7zh-label-ttl"><input type="number" id="j7zh-label-empty-ttl" min="1" max="8760" step="1" inputmode="numeric" aria-label="空结果缓存小时数"><span>小时</span></label></div>' +
       '<button type="button" class="j7zh-label-update-all" id="j7zh-label-update-all">全部更新</button>' +
       '<div class="j7zh-menu-foot j7zh-label-status" id="j7zh-label-status"></div>' +
     '</div>';
@@ -1138,6 +1178,7 @@
     const manageButton = menu.querySelector('#j7zh-label-manage');
     const fileInput = menu.querySelector('#j7zh-label-file');
     const saveButton = menu.querySelector('#j7zh-label-save-cookie');
+    const clearButton = menu.querySelector('#j7zh-label-clear-cookie');
     const updateButton = menu.querySelector('#j7zh-label-update-all');
     const curlInput = menu.querySelector('#j7zh-label-curl');
 
@@ -1172,10 +1213,22 @@
       try {
         const result = await sendLabelMessage({ type: 'j7zh-label-config-save', command });
         curlInput.value = '';
-        LABELS.status = 'Cookie 已保存，共 ' + result.config.cookieCount + ' 项';
+        LABELS.status = (result.config.replaced ? 'Cookie 已覆盖' : 'Cookie 已保存') + '，共 ' + result.config.cookieCount + ' 项';
         applyPublicLabelState(result.state);
       } catch (error) { LABELS.status = '保存失败：' + error.message; renderLabelPanelState(); }
       finally { saveButton.disabled = false; }
+    });
+
+    clearButton.addEventListener('click', async () => {
+      clearButton.disabled = true;
+      try {
+        const result = await sendLabelMessage({ type: 'j7zh-label-config-clear' });
+        curlInput.value = '';
+        clearMissingLabelQueue();
+        LABELS.status = 'Cookie 已清除（移除 ' + result.config.removedCookies + ' 项）';
+        applyPublicLabelState(result.state);
+      } catch (error) { LABELS.status = '清除失败：' + error.message; renderLabelPanelState(); }
+      finally { renderLabelPanelState(); }
     });
 
     updateButton.addEventListener('click', async () => {
@@ -1294,9 +1347,11 @@
       const inp = e.target;
       if (inp && inp.id === 'j7zh-label-auto') {
         LABELS.autoUpdate = !!inp.checked;
+        if (!LABELS.autoUpdate) clearMissingLabelQueue();
         sendLabelMessage({ type: 'j7zh-label-auto-set', enabled: LABELS.autoUpdate }).then((result) => {
           LABELS.status = LABELS.autoUpdate ? '无记录博主自动更新已开启' : '无记录博主自动更新已关闭';
           applyPublicLabelState(result.state);
+          if (LABELS.autoUpdate) scanLabels(document.body);
         }).catch((error) => { LABELS.status = '设置失败：' + error.message; renderLabelPanelState(); });
         return;
       }
@@ -1349,7 +1404,7 @@
 
   /* ---------- 启动 ---------- */
   // 调试钩子（控制台可用 __j7zh.walk(document.body) 手动补扫，__j7zh.scan() 重扫翻译）
-  window.__j7zh = { walk, lookup, settings: S, version: '1.7.3', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
+  window.__j7zh = { walk, lookup, settings: S, version: '1.8.0', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
 
   document.addEventListener('pointerdown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
   document.addEventListener('keydown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
