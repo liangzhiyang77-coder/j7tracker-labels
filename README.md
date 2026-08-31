@@ -38,7 +38,7 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 
 ![J7 信息流中的 Twitter 作者标签效果](docs/images/twitter-label-example-feed.png)
 
-1. 打开「Twitter 标签备注」即可使用内置数据；只有非空 `position` 会显示标签。每个作者时间/标签旁都有铅笔 `✎`，点击后可输入并保存自定义备注。
+1. 打开「Twitter 标签备注」即可使用内置数据；只有非空 `position` 会显示标签。鼠标进入推文卡片时，作者时间/标签旁会显示铅笔 `✎`，点击后可输入并保存自定义备注；移出卡片后自动隐藏。
 2. 菜单中的「编辑备注」提供集中管理：搜索、新增、修改、删除（隐藏）和恢复 Frontrun 备注。
 3. 「导入」接受 JSON 数组，或含 `data` / `rows` / `labels` 数组的对象；每条记录使用 `twitterUsername`、`position` 和 `source`。同名账号不区分大小写；用户备注优先于导入的 Frontrun 备注，其余同来源记录覆盖同名并保留其他记录。
 4. 「导出」保存当前全部标签及来源，但不会包含 Cookie 或 Frontrun 请求配置。

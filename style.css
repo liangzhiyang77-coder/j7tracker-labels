@@ -151,13 +151,28 @@ html.j7zh-reader .profile-card { max-width: 520px !important; }
   font: 700 15px/1 system-ui, sans-serif;
   cursor: pointer;
   vertical-align: middle;
-  opacity: .42;
-  transition: opacity .12s ease, color .12s ease, background .12s ease, border-color .12s ease;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(.9);
+  transition: opacity .12s ease, transform .12s ease, color .12s ease, background .12s ease, border-color .12s ease;
 }
-.tweet-author:hover .j7zh-label-edit,
-.quoted-author:hover .j7zh-label-edit,
+.tweet-embed:hover .j7zh-label-edit,
+.tweet-card:hover .j7zh-label-edit,
+.j7zh-label-edit:focus-visible,
+.j7zh-label-edit:focus {
+  opacity: .72;
+  pointer-events: auto;
+  transform: scale(1);
+}
+.j7zh-label-edit:focus-visible,
 .j7zh-label-edit:focus,
-.j7zh-label-edit:hover { opacity: 1; color: #e0e7ff; background: rgba(99,102,241,.18); border-color: rgba(129,140,248,.42); outline: none; }
+.j7zh-label-edit:hover {
+  opacity: 1;
+  color: #e0e7ff;
+  background: rgba(99,102,241,.18);
+  border-color: rgba(129,140,248,.42);
+  outline: none;
+}
 
 .j7zh-label-editor {
   position: fixed;
