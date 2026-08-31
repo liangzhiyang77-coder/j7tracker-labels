@@ -1,8 +1,9 @@
 /* J7Tracker 中文界面 — content script
- * 三个功能，都可在右下角「中」菜单里开关：
+ * 功能都可在右下角「中」菜单里独立配置：
  *   1. 界面汉化：遍历文本节点 + placeholder/title/aria-label，按字典替换；MutationObserver 跟 SPA 动态渲染
  *   2. 阅读模式：一段 CSS（html.j7zh-reader），卡片收窄居中、图片缩小、行距放宽
  *   3. 正文翻译：把推文/引用/回复的文字发给 Google 翻译（经 background.js），译文附在原文下方
+ *   4. 作者标签：按 Twitter username 在推文头部展示本地 position，并可从 Frontrun 更新
  * 推文正文、币名、账号名等数据容器一律不做字典替换。
  */
 (function () {
@@ -20,12 +21,13 @@
     trans: 'j7zh_autotrans',   // 正文翻译     默认开
     engine: 'j7zh_engine',     // 翻译引擎     auto | local | google
     copykw: 'j7zh_copykw',     // 点击关键词复制 默认开
-    gmgn: 'j7zh_gmgn'          // 复制后打开 GMGN 搜索 默认开
+    gmgn: 'j7zh_gmgn',         // 复制后打开 GMGN 搜索 默认开
+    labels: 'j7zh_labels'       // Twitter 作者标签 默认开
   };
   const getFlag = (k, def) => { try { const v = localStorage.getItem(k); return v === null ? def : v !== '0'; } catch (e) { return def; } };
   const setFlag = (k, v) => { try { localStorage.setItem(k, v ? '1' : '0'); } catch (e) {} };
   const getStr = (k, def) => { try { return localStorage.getItem(k) || def; } catch (e) { return def; } };
-  const S = { ui: getFlag(LS.ui, true), reader: getFlag(LS.reader, true), trans: getFlag(LS.trans, true), engine: getStr(LS.engine, 'auto'), copykw: getFlag(LS.copykw, true), gmgn: getFlag(LS.gmgn, true) };
+  const S = { ui: getFlag(LS.ui, true), reader: getFlag(LS.reader, true), trans: getFlag(LS.trans, true), engine: getStr(LS.engine, 'auto'), copykw: getFlag(LS.copykw, true), gmgn: getFlag(LS.gmgn, true), labels: getFlag(LS.labels, true) };
   if (!/^(auto|local|google)$/.test(S.engine)) S.engine = 'auto';
 
   /* ---------- 字典索引 ---------- */
@@ -49,7 +51,7 @@
   /* ---------- 跳过的容器（用户内容 / 数据） ---------- */
   const EXCLUDE_SEL = [
     'script', 'style', 'textarea', 'input', 'code', 'pre', 'kbd', '[contenteditable]',
-    '#j7zh-toggle', '#j7zh-menu', '.j7zh-trans',
+    '#j7zh-toggle', '#j7zh-menu', '.j7zh-trans', '.j7zh-user-label', '.j7zh-label-panel',
     // 推文正文与引用
     '.tweet-content', '.quoted-tweet', '.nested-quoted-tweet', '.reply-to-tweet',
     '.pinned-text', '.pinned-tweet-content', '.pinned-update-content', '.following-update-content',
@@ -178,7 +180,10 @@
 
   /* ---------- 遍历 ---------- */
   const SKIP_TAGS = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1 };
-  function isOurs(el) { return el.id === 'j7zh-toggle' || el.id === 'j7zh-menu' || (el.classList && el.classList.contains('j7zh-trans')); }
+  function isOurs(el) {
+    return el.id === 'j7zh-toggle' || el.id === 'j7zh-menu' ||
+      (el.classList && (el.classList.contains('j7zh-trans') || el.classList.contains('j7zh-user-label') || el.classList.contains('j7zh-label-panel')));
+  }
 
   function walk(root) {
     if (!root) return;
@@ -523,9 +528,10 @@
   function processScan(n) {
     tagKeywords(n);
     if (S.trans) scanUnits(n);
+    if (S.labels) scanLabels(n);
   }
   function scheduleScan(node) {
-    if (!S.trans && !S.copykw) return;
+    if (!S.trans && !S.copykw && !S.labels) return;
     scanPending.add(node || document.body);
     if (scanTimer) return;
     scanTimer = setTimeout(() => {
@@ -636,6 +642,279 @@
     if (S.copykw) tagKeywords(document.body);
   }
 
+  /* =====================================================================
+   *  Twitter 作者 position 标签
+   *  标签和 Frontrun 敏感配置由 background 持久化；content 只拿公开的 username/position。
+   * ===================================================================== */
+  const LU = window.J7ZhLabels;
+  const LABELS = {
+    map: new Map(),
+    loaded: false,
+    loading: null,
+    autoUpdate: false,
+    configSaved: false,
+    count: 0,
+    nonEmpty: 0,
+    job: { busy: false, phase: 'idle', current: 0, total: 0, updated: 0, error: '' },
+    rate: null,
+    missing: new Set(),
+    pending: new Set(),
+    missingTimer: null,
+    status: ''
+  };
+  const AUTHOR_SEL = '.tweet-author, .quoted-author, .nested-quoted-author, .pinned-tweet-author';
+
+  function sendLabelMessage(message) {
+    return new Promise((resolve, reject) => {
+      if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.id) { reject(new Error('扩展后台不可用')); return; }
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+        if (!response || !response.ok) { reject(new Error(response && response.error || '标签操作失败')); return; }
+        resolve(response.result || {});
+      });
+    });
+  }
+
+  function mergeLabelRows(rows, replace) {
+    if (!LU) return;
+    if (replace) LABELS.map.clear();
+    for (const row of LU.normalizeRows(rows)) LABELS.map.set(row.twitterUsername.toLowerCase(), row);
+    LABELS.loaded = true;
+    LABELS.count = LABELS.map.size;
+    LABELS.nonEmpty = [...LABELS.map.values()].filter((row) => row.position).length;
+  }
+
+  function applyPublicLabelState(state) {
+    if (!state) return;
+    LABELS.autoUpdate = state.autoUpdate === true;
+    LABELS.configSaved = state.configSaved === true;
+    LABELS.count = Number(state.count) || LABELS.map.size;
+    LABELS.nonEmpty = Number(state.nonEmpty) || 0;
+    LABELS.job = state.job || LABELS.job;
+    LABELS.rate = state.rate || null;
+    renderLabelPanelState();
+  }
+
+  function loadLabelState(force) {
+    if (!LU) return Promise.reject(new Error('标签工具未加载'));
+    if (LABELS.loading && !force) return LABELS.loading;
+    LABELS.loading = sendLabelMessage({ type: 'j7zh-labels-get' }).then((result) => {
+      mergeLabelRows(result.rows, true);
+      applyPublicLabelState(result.state);
+      scanLabels(document.body);
+      return result;
+    }).catch((error) => {
+      LABELS.status = error.message;
+      renderLabelPanelState();
+      throw error;
+    }).finally(() => { LABELS.loading = null; });
+    return LABELS.loading;
+  }
+
+  function findAuthorUsername(author) {
+    if (!LU || !author) return '';
+    for (const link of author.querySelectorAll('a[href]')) {
+      const username = LU.usernameFromHref(link.href);
+      if (username) return username;
+    }
+    const handleEl = author.querySelector('.profile-handle, [class*="handle"], [class*="username"]');
+    const match = String(handleEl && handleEl.textContent || author.textContent || '').match(/@([A-Za-z0-9_]{1,50})/);
+    return match ? LU.normalizeUsername(match[1]) : '';
+  }
+
+  function labelTarget(author) {
+    return author.querySelector('.tweet-time, .modern-inline-time, .mlw-bb-time, .time-full, .time-short, time') ||
+      author.querySelector('.tweet-author-name, .profile-name, strong, a[href]');
+  }
+
+  function queueMissingLabel(username) {
+    if (!LABELS.autoUpdate || !LABELS.configSaved || !username) return;
+    const key = username.toLowerCase();
+    if (LABELS.pending.has(key)) return;
+    LABELS.missing.add(username);
+    if (LABELS.missingTimer) return;
+    LABELS.missingTimer = setTimeout(() => {
+      LABELS.missingTimer = null;
+      const usernames = [...LABELS.missing];
+      LABELS.missing.clear();
+      if (!usernames.length) return;
+      usernames.forEach((name) => LABELS.pending.add(name.toLowerCase()));
+      sendLabelMessage({ type: 'j7zh-label-query-missing', usernames }).then((result) => {
+        mergeLabelRows(result.rows || [], false);
+        applyPublicLabelState(result.state);
+        scanLabels(document.body);
+      }).catch((error) => {
+        LABELS.status = error.message;
+        renderLabelPanelState();
+      }).finally(() => { usernames.forEach((name) => LABELS.pending.delete(name.toLowerCase())); });
+    }, 1200);
+  }
+
+  function scanLabels(root) {
+    if (!LU || !root) return;
+    const scope = root.nodeType === 1 ? root : document.body;
+    if (!scope) return;
+    let authors = [];
+    try {
+      if (scope.matches && scope.matches(AUTHOR_SEL)) authors.push(scope);
+      authors.push(...scope.querySelectorAll(AUTHOR_SEL));
+    } catch (e) { return; }
+    for (const author of authors) {
+      const username = findAuthorUsername(author);
+      if (!username) continue;
+      const key = username.toLowerCase();
+      const row = LABELS.map.get(key);
+      let badge = author.querySelector('.j7zh-user-label[data-j7zh-user="' + key + '"]');
+      if (!S.labels || !row || !row.position) {
+        if (badge) badge.remove();
+        if (S.labels && LABELS.loaded && !LABELS.map.has(key)) queueMissingLabel(username);
+        continue;
+      }
+      if (!badge) {
+        author.querySelectorAll('.j7zh-user-label').forEach((old) => old.remove());
+        badge = document.createElement('span');
+        badge.className = 'j7zh-user-label';
+        badge.dataset.j7zhUser = key;
+        badge.title = '@' + row.twitterUsername + ' · Frontrun position';
+        const target = labelTarget(author);
+        if (target) target.insertAdjacentElement('afterend', badge);
+        else author.appendChild(badge);
+      }
+      if (badge.textContent !== row.position) badge.textContent = row.position;
+    }
+  }
+
+  function removeLabelBadges() { document.querySelectorAll('.j7zh-user-label').forEach((badge) => badge.remove()); }
+  function applyLabels() {
+    document.documentElement.classList.toggle('j7zh-labels', !!S.labels);
+    if (!S.labels) { removeLabelBadges(); return; }
+    if (LABELS.loaded) scanLabels(document.body);
+    else loadLabelState().catch(() => null);
+  }
+
+  function labelStatusText() {
+    const job = LABELS.job || {};
+    if (job.busy) return '全部更新中：' + (job.current || 0) + ' / ' + (job.total || LABELS.count) + '（已返回 ' + (job.updated || 0) + '）';
+    if (job.phase === 'error' && job.error) return '更新失败：' + job.error;
+    if (job.phase === 'done') return '全部更新完成：' + (job.total || LABELS.count) + ' 个 username';
+    if (LABELS.status) return LABELS.status;
+    let text = '标签 ' + LABELS.count + ' 条，有备注 ' + LABELS.nonEmpty + ' 条；Cookie ' + (LABELS.configSaved ? '已保存' : '未保存');
+    if (LABELS.rate && LABELS.rate.minuteRemaining != null) text += '；分钟余量 ' + LABELS.rate.minuteRemaining;
+    return text;
+  }
+
+  function renderLabelPanelState() {
+    const panel = document.getElementById('j7zh-label-panel');
+    if (panel) panel.hidden = !S.labels;
+    const status = document.getElementById('j7zh-label-status');
+    if (status) textContentSafe(status, labelStatusText());
+    const auto = document.getElementById('j7zh-label-auto');
+    if (auto) auto.checked = LABELS.autoUpdate;
+    const update = document.getElementById('j7zh-label-update-all');
+    if (update) {
+      update.disabled = !!LABELS.job.busy || !LABELS.configSaved;
+      update.textContent = LABELS.job.busy ? '更新中…' : '全部更新';
+    }
+  }
+
+  function textContentSafe(element, text) { if (element) element.textContent = String(text || ''); }
+
+  function labelPanelHtml() {
+    return '<div class="j7zh-label-panel" id="j7zh-label-panel"' + (S.labels ? '' : ' hidden') + '>' +
+      '<div class="j7zh-label-actions"><button type="button" id="j7zh-label-import">导入</button><button type="button" id="j7zh-label-export">导出</button><input id="j7zh-label-file" type="file" accept="application/json,.json" hidden></div>' +
+      '<div class="j7zh-label-config"><b>从 Frontrun 更新</b><textarea id="j7zh-label-curl" rows="4" autocomplete="off" spellcheck="false" placeholder="粘贴完整 curl 命令；保存后输入框会清空，Cookie 不会进入导出文件"></textarea><button type="button" id="j7zh-label-save-cookie">保存 Cookie</button></div>' +
+      '<label class="j7zh-row j7zh-label-auto-row"><input type="checkbox" id="j7zh-label-auto"><span class="j7zh-sw"></span><span class="j7zh-txt"><b>更新无记录博主</b><small>刷到本地没有记录的 username 时，低频向 Frontrun 补全并保存</small></span></label>' +
+      '<button type="button" class="j7zh-label-update-all" id="j7zh-label-update-all">全部更新</button>' +
+      '<div class="j7zh-menu-foot j7zh-label-status" id="j7zh-label-status"></div>' +
+    '</div>';
+  }
+
+  function downloadLabelRows(rows) {
+    const payload = { version: 1, exportedAt: new Date().toISOString(), data: LU.normalizeRows(rows) };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'j7tracker-twitter-labels-' + new Date().toISOString().slice(0, 10) + '.json';
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function wireLabelPanel(menu) {
+    const importButton = menu.querySelector('#j7zh-label-import');
+    const exportButton = menu.querySelector('#j7zh-label-export');
+    const fileInput = menu.querySelector('#j7zh-label-file');
+    const saveButton = menu.querySelector('#j7zh-label-save-cookie');
+    const updateButton = menu.querySelector('#j7zh-label-update-all');
+    const curlInput = menu.querySelector('#j7zh-label-curl');
+
+    importButton.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      try {
+        const data = JSON.parse(await file.text());
+        const result = await sendLabelMessage({ type: 'j7zh-labels-import', data });
+        LABELS.status = '已导入 ' + result.imported + ' 条标签（同名覆盖，其余保留）';
+        applyPublicLabelState(result.state);
+        await loadLabelState(true);
+      } catch (error) { LABELS.status = '导入失败：' + error.message; renderLabelPanelState(); }
+      finally { fileInput.value = ''; }
+    });
+
+    exportButton.addEventListener('click', async () => {
+      try {
+        const result = await sendLabelMessage({ type: 'j7zh-labels-export' });
+        downloadLabelRows(result.rows || []);
+        LABELS.status = '已导出 ' + (result.rows || []).length + ' 条标签（不含 Cookie）';
+        renderLabelPanelState();
+      } catch (error) { LABELS.status = '导出失败：' + error.message; renderLabelPanelState(); }
+    });
+
+    saveButton.addEventListener('click', async () => {
+      const command = curlInput.value.trim();
+      if (!command) { LABELS.status = '请先粘贴完整 curl 命令'; renderLabelPanelState(); return; }
+      saveButton.disabled = true;
+      try {
+        const result = await sendLabelMessage({ type: 'j7zh-label-config-save', command });
+        curlInput.value = '';
+        LABELS.status = 'Cookie 已保存，共 ' + result.config.cookieCount + ' 项';
+        applyPublicLabelState(result.state);
+      } catch (error) { LABELS.status = '保存失败：' + error.message; renderLabelPanelState(); }
+      finally { saveButton.disabled = false; }
+    });
+
+    updateButton.addEventListener('click', async () => {
+      updateButton.disabled = true;
+      try {
+        const result = await sendLabelMessage({ type: 'j7zh-label-update-all' });
+        LABELS.status = result.started ? '全部更新任务已开始' : '已有更新任务正在运行';
+        applyPublicLabelState(result.state);
+      } catch (error) { LABELS.status = '启动失败：' + error.message; renderLabelPanelState(); }
+    });
+
+    renderLabelPanelState();
+    loadLabelState().catch(() => null);
+  }
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.onMessage.addListener((message) => {
+        if (!message || typeof message.type !== 'string') return;
+        if (message.type === 'j7zh-labels-changed') {
+          mergeLabelRows(message.rows || [], false);
+          applyPublicLabelState(message.state);
+          scanLabels(document.body);
+        } else if (message.type === 'j7zh-label-progress') {
+          applyPublicLabelState(message.state);
+        }
+      });
+    }
+  } catch (e) {}
+
   /* ---------- 观察器（同步处理，后台标签页里 rAF 不触发） ---------- */
   function handleNode(n) {
     try {
@@ -644,7 +923,7 @@
       if (n.nodeType !== 1) return;
       if (isOurs(n)) return;
       if (S.ui) walk(n);
-      if (S.trans || S.copykw) scheduleScan(n.closest ? (n.closest('.tweet-embed') || n) : n);
+      if (S.trans || S.copykw || S.labels) scheduleScan(n.closest ? (n.closest('.tweet-embed') || n) : n);
     } catch (e) { /* 单个节点出错不影响其它 */ }
   }
 
@@ -687,7 +966,7 @@
     btn.id = 'j7zh-toggle';
     btn.type = 'button';
     btn.textContent = '中';
-    btn.title = 'J7 中文扩展：界面汉化 / 阅读模式 / 正文翻译';
+    btn.title = 'J7 中文扩展：界面汉化 / 阅读模式 / 正文翻译 / Twitter 标签';
     btn.setAttribute('data-on', S.ui ? '1' : '0');
     btn.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu(); });
     (document.body || document.documentElement).appendChild(btn);
@@ -705,6 +984,8 @@
       row('trans', '正文翻译', '推文 / 引用 / 回复正文翻成中文，附在原文下方'),
       row('copykw', '点击关键词复制', '点推文里的高亮关键词（AI 预测名、关键词、CA）即复制'),
       row('gmgn', '复制后 GMGN 搜索', '后台打开/复用 GMGN 标签页并搜索该词，不切走当前页面'),
+      row('labels', 'Twitter 标签备注', '在推文作者 username 后显示本地 position 标签'),
+      labelPanelHtml(),
       '<div class="j7zh-row j7zh-row-sel"><span class="j7zh-txt"><b>翻译引擎</b><small>本地 = Chrome 内置离线翻译（快、无限流，需 Chrome 138+）；Google = 网页翻译接口（可能限流）</small></span>' +
         '<select id="j7zh-engine">' +
           '<option value="auto"' + (S.engine === 'auto' ? ' selected' : '') + '>自动（本地优先）</option>' +
@@ -720,6 +1001,14 @@
     ['click', 'pointerdown', 'mousedown', 'keydown', 'keyup'].forEach((t) => m.addEventListener(t, (e) => e.stopPropagation()));
     m.addEventListener('change', (e) => {
       const inp = e.target;
+      if (inp && inp.id === 'j7zh-label-auto') {
+        LABELS.autoUpdate = !!inp.checked;
+        sendLabelMessage({ type: 'j7zh-label-auto-set', enabled: LABELS.autoUpdate }).then((result) => {
+          LABELS.status = LABELS.autoUpdate ? '无记录博主自动更新已开启' : '无记录博主自动更新已关闭';
+          applyPublicLabelState(result.state);
+        }).catch((error) => { LABELS.status = '设置失败：' + error.message; renderLabelPanelState(); });
+        return;
+      }
       if (inp && inp.id === 'j7zh-engine') {
         S.engine = inp.value; try { localStorage.setItem(LS.engine, S.engine); } catch (err) {}
         // 换引擎：清掉已有译文重翻，方便对比
@@ -739,8 +1028,10 @@
       if (k === 'reader') applyReader();
       if (k === 'copykw') applyCopyKw();
       if (k === 'trans') { applyTransFlag(); setStatus(TR.status); if (S.trans) scheduleScan(document.body); }
+      if (k === 'labels') { applyLabels(); renderLabelPanelState(); }
     });
     (document.body || document.documentElement).appendChild(m);
+    wireLabelPanel(m);
     // 点菜单外面 / 按 Esc 关闭；点菜单内部（开关、下拉框）不关
     const close = (ev) => {
       const mm = document.getElementById('j7zh-menu');
@@ -756,7 +1047,7 @@
 
   /* ---------- 启动 ---------- */
   // 调试钩子（控制台可用 __j7zh.walk(document.body) 手动补扫，__j7zh.scan() 重扫翻译）
-  window.__j7zh = { walk, lookup, settings: S, version: '1.5.0', scan: () => scanUnits(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
+  window.__j7zh = { walk, lookup, settings: S, version: '1.6.0', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
 
   document.addEventListener('pointerdown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
   document.addEventListener('keydown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
@@ -766,6 +1057,7 @@
     applyReader();
     applyTransFlag();
     applyCopyKw();
+    applyLabels();
     if (S.ui) { try { walk(document.body); } catch (e) { console.error('[j7zh] walk failed', e); } }
     if (S.trans) scheduleScan(document.body);
   }
@@ -776,7 +1068,7 @@
     setTimeout(firstPass, 800);
     setTimeout(firstPass, 3000);
     // 兜底：每 4 秒把缓存里已有的译文补回被重绘掉的卡片（只查 DOM，不发请求）
-    setInterval(() => { tagKeywords(document.body); if (S.trans) scanUnits(document.body); }, 4000);
+    setInterval(() => { tagKeywords(document.body); if (S.trans) scanUnits(document.body); if (S.labels) scanLabels(document.body); }, 4000);
   }
 
   if (document.readyState === 'loading') {
@@ -785,7 +1077,7 @@
       firstPass();
       setTimeout(firstPass, 800);
       setTimeout(firstPass, 3000);
-      setInterval(() => { tagKeywords(document.body); if (S.trans) scanUnits(document.body); }, 4000);
+      setInterval(() => { tagKeywords(document.body); if (S.trans) scanUnits(document.body); if (S.labels) scanLabels(document.body); }, 4000);
     });
   } else {
     boot();

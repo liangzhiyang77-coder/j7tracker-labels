@@ -1,8 +1,8 @@
 # J7Tracker 中文界面
 
-> 让 [j7tracker.io](https://j7tracker.io/@howe) 好读的 Chrome 扩展：界面汉化 + 阅读模式 + 推文正文自动翻译。
+> 让 [j7tracker.io](https://j7tracker.io/@howe) 好读的 Chrome 扩展：界面汉化 + 阅读模式 + 推文正文自动翻译 + Twitter 作者标签。
 
-J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、信息密度低。这个扩展把它改造成一个舒服的中文阅读器，五个功能都在页面右下角「中」按钮的菜单里独立开关，默认全开：
+J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、信息密度低。这个扩展把它改造成一个舒服的中文阅读器，各项功能都在页面右下角「中」按钮的菜单里独立开关，默认全开：
 
 | 功能 | 说明 |
 | --- | --- |
@@ -11,6 +11,7 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 | **点击关键词复制** | 站点会把关键词（AI 预测名、你设置的关键词、CA 等）标成高亮药丸——点一下即复制该词到剪贴板，弹「已复制」气泡；悬停有描边提示。站点原生没有这个能力（药丸默认 `pointer-events: none`，本扩展恢复了它的可点性） |
 | **复制后 GMGN 搜索** | 点关键词后在**后台**打开/复用 GMGN（gmgn.ai）标签页并在其搜索弹窗填入该词——不切走焦点，人留在 j7 继续看流，想看结果自己切过去（配合浏览器分屏体验最佳）。始终复用同一个标签页，不会越开越多。GMGN 首次打开搜索弹窗要求可信事件，本扩展通过直接调用其 React `onFocus` 处理函数绕过（`gmgn.js` 以 MAIN world 注入）；后台打开由 service worker 的 `tabs` API 完成（因此声明了 `tabs` 权限）。已有 GMGN 页时**不做任何导航**——background 经 `gmgn-bridge.js` 直接发消息给页面原地换搜索词，零刷新 |
 | **正文翻译** | 推文 / 引用 / 回复 / 资料简介自动翻成中文，以「译」块附在原文下方。默认走 **Chrome 内置离线翻译**（Translator API，快、无限流、不出网），Google 网页接口兜底；带本地缓存，刷新不重翻 |
+| **Twitter 标签备注** | 按 username 在作者时间后显示 Frontrun `position`。内置 1493 个账号数据，支持 JSON 导入/导出、缺失账号自动补全和全部更新 |
 
 ## 安装
 
@@ -25,9 +26,19 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 
 ## 使用
 
-- 右下角紫色圆点「中」→ 打开菜单：五个功能开关 + 翻译引擎选择（自动 / 仅本地 / 仅 Google），底部显示当前翻译状态与缓存量。
+- 右下角紫色圆点「中」→ 打开菜单：功能开关、Twitter 标签管理和翻译引擎选择（自动 / 仅本地 / 仅 Google）。
 - 「界面汉化」切换会刷新页面；另外两项即时生效。
-- 设置存在 j7tracker.io 的 localStorage：`j7zh_enabled` / `j7zh_reader` / `j7zh_autotrans` / `j7zh_copykw` / `j7zh_gmgn` / `j7zh_engine`，译文缓存在 `j7zh_trcache_v1`（约 1500 条滚动）。
+- 设置存在 j7tracker.io 的 localStorage：`j7zh_enabled` / `j7zh_reader` / `j7zh_autotrans` / `j7zh_copykw` / `j7zh_gmgn` / `j7zh_labels` / `j7zh_engine`，译文缓存在 `j7zh_trcache_v1`（约 1500 条滚动）。
+
+### Twitter 标签
+
+1. 打开「Twitter 标签备注」即可使用内置数据；只有非空 `position` 会显示标签。
+2. 「导入」接受 JSON 数组，或含 `data` / `rows` / `labels` 数组的对象；每条记录使用 `twitterUsername` 和 `position`。同名账号不区分大小写，导入时覆盖同名、保留其他记录。
+3. 「导出」保存当前全部标签，但不会包含 Cookie 或 Frontrun 请求配置。
+4. 如需联网更新，从 DevTools 复制 Frontrun `batch-query-light` 请求的完整 cURL，粘贴后点「保存 Cookie」。输入框随后清空。
+5. 「更新无记录博主」只在刷到本地完全没有该 username 时补查；「全部更新」按每批最多 30 个、串行随机间隔刷新当前全部账号。面板会显示进度和接口剩余额度。
+
+Frontrun Cookie 只保存在 `chrome.storage.local` 和目标域 Cookie 存储中。Cookie 失效后重新粘贴并保存新的 cURL 即可。
 
 ## 翻译引擎
 
@@ -42,16 +53,19 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 
 - 界面汉化、阅读模式：纯本地，不发任何请求。
 - 正文翻译用本地引擎时：不出网。仅当本地不可用 / 语种不支持 / 手动选了 Google 时，推文文本（公开内容，不含你的账号信息）会发给 Google 翻译接口。
-- `host_permissions` 只声明了两个 Google 翻译域名；`gmgn.js` 只在带 `#j7q=` 标记时动作。扩展不收集、不上报任何数据。
+- Twitter 标签默认只读本地数据。只有用户保存 Frontrun cURL 并主动开启自动补全或点击全部更新时，扩展才向 `loadbalance.frontrun.pro` 发送公开的 Twitter username。
+- `host_permissions` 声明两个 Google 翻译域名和 Frontrun 标签接口；`gmgn.js` 只在带 `#j7q=` 标记时动作。扩展不收集、不上报其他数据。
 
 ## 文件说明
 
 | 文件 | 作用 |
 | --- | --- |
 | `manifest.json` | MV3 清单，只在 `*.j7tracker.io` 运行 |
+| `label-utils.js` | username、导入数据、cURL/Cookie 和批次的纯逻辑解析，供 content 与 background 共用 |
+| `twitter-labels.seed.json` | 内置的 1493 个 `twitterUsername` / `position` 初始记录 |
 | `dict.js` | 英→中字典：`exact` 精确匹配、`regex` 带数字/变量的模式（含 12→24 小时制转换）、`context` 推文头部动词、`inButton` 按钮内特殊译法 |
-| `content.js` | 界面汉化引擎（文本节点 + placeholder/title/aria-label，MutationObserver 跟 SPA 渲染，正文容器整体排除）+ 正文翻译调度（取文、去重、批量、插「译」块）+ 右下角菜单 |
-| `background.js` | service worker：代发 Google 翻译请求（批量、退避、缓存） |
+| `content.js` | 界面汉化引擎、正文翻译调度、作者标签注入和右下角菜单 |
+| `background.js` | service worker：代发 Google 翻译请求；持久化标签与 Frontrun 配置；串行批量更新、退避和进度广播 |
 | `gmgn.js` | 注入 gmgn.ai（MAIN world）：自动打开搜索弹窗并填入关键词；入口有三个——首载 `#j7q=`、hashchange（兜底）、bridge 消息（常规，零导航） |
 | `gmgn-bridge.js` | 注入 gmgn.ai（isolated world）的消息桥：把 background 的搜索指令 postMessage 给 MAIN world 的 `gmgn.js` |
 | `style.css` | 阅读模式、译文块、菜单样式；以及让中文按钮按整词排版（CJK 会被 flex 拆成单字竖排）的 `word-break: keep-all` |
@@ -64,7 +78,7 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 2. 带数字的文案（如 `Showing 50 of 7053`）加到 `regex`；同一个词在按钮里要不同译法加到 `inButton`
 3. `chrome://extensions` 点扩展卡片上的刷新 ↻，再刷新页面
 
-调试：控制台 `__j7zh.lookup("Some text", document.body)` 查某句会翻成什么；`__j7zh.walk(document.body)` 手动补扫界面；`__j7zh.scan()` 重扫正文翻译；`__j7zh.tr` 看翻译队列/缓存/失败状态。
+调试：控制台 `__j7zh.lookup("Some text", document.body)` 查某句会翻成什么；`__j7zh.walk(document.body)` 手动补扫界面；`__j7zh.scan()` 重扫正文翻译；`__j7zh.scanLabels()` 重扫作者标签；`__j7zh.tr` / `__j7zh.labels` 查看运行状态。
 
 ## 已知边界
 

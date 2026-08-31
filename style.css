@@ -36,7 +36,9 @@ h1, h2, h3, h4, h5, h6, .header-button-text, .unified-category-btn, .unified-sid
   right: 10px;
   bottom: 72px;
   z-index: 2147483647;
-  width: 300px;
+  width: min(380px, calc(100vw - 20px));
+  max-height: min(82vh, 760px);
+  overflow-y: auto;
   padding: 10px 12px 8px;
   border-radius: 12px;
   background: rgba(30,32,38,0.97);
@@ -116,6 +118,78 @@ html.j7zh-reader .profile-card { max-width: 520px !important; }
 #j7zh-menu .j7zh-row-sel .j7zh-txt { flex: 1 1 auto; }
 #j7zh-menu select { flex: 0 0 auto; margin-left: 8px; max-width: 120px; font: 12px -apple-system, "PingFang SC", system-ui, sans-serif; color: #e5e7eb; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 3px 4px; }
 #j7zh-menu select option { color: #111; }
+
+/* ===== Twitter 作者标签 ===== */
+.j7zh-user-label {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  max-width: 240px;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border: 1px solid rgba(129,140,248,.72);
+  border-radius: 4px;
+  background: linear-gradient(135deg, rgba(79,70,229,.92), rgba(109,40,217,.92));
+  color: #f5f3ff;
+  font: 600 12px/1.25 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  word-break: keep-all;
+}
+
+/* ===== 标签管理面板 ===== */
+#j7zh-menu .j7zh-label-panel {
+  margin: 4px 2px 8px 48px;
+  padding: 8px;
+  border: 1px solid rgba(129,140,248,.24);
+  border-radius: 9px;
+  background: rgba(17,24,39,.45);
+}
+#j7zh-menu .j7zh-label-panel[hidden] { display: none !important; }
+#j7zh-menu .j7zh-label-actions { display: flex; gap: 7px; margin-bottom: 8px; }
+#j7zh-menu .j7zh-label-actions button,
+#j7zh-menu .j7zh-label-config button,
+#j7zh-menu .j7zh-label-update-all {
+  border: 1px solid rgba(129,140,248,.38);
+  border-radius: 6px;
+  background: rgba(99,102,241,.16);
+  color: #e5e7eb;
+  padding: 5px 9px;
+  font: 600 11px/1.25 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  cursor: pointer;
+}
+#j7zh-menu .j7zh-label-actions button:hover,
+#j7zh-menu .j7zh-label-config button:hover,
+#j7zh-menu .j7zh-label-update-all:hover { background: rgba(99,102,241,.3); }
+#j7zh-menu .j7zh-label-actions button:disabled,
+#j7zh-menu .j7zh-label-config button:disabled,
+#j7zh-menu .j7zh-label-update-all:disabled { cursor: not-allowed; opacity: .45; }
+#j7zh-menu .j7zh-label-config { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-bottom: 6px; }
+#j7zh-menu .j7zh-label-config b { grid-column: 1 / -1; font-size: 11px; color: #c7d2fe; }
+#j7zh-menu .j7zh-label-config textarea {
+  grid-column: 1 / -1;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: 6px;
+  background: rgba(0,0,0,.22);
+  color: #e5e7eb;
+  padding: 6px 7px;
+  font: 10px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace;
+  outline: none;
+}
+#j7zh-menu .j7zh-label-config textarea:focus { border-color: rgba(129,140,248,.75); }
+#j7zh-menu .j7zh-label-config button { grid-column: 2; justify-self: end; }
+#j7zh-menu .j7zh-label-auto-row { margin: 3px -4px; padding: 5px 4px; }
+#j7zh-menu .j7zh-label-auto-row .j7zh-sw { width: 30px; height: 18px; }
+#j7zh-menu .j7zh-label-auto-row .j7zh-sw::after { width: 14px; height: 14px; }
+#j7zh-menu .j7zh-label-auto-row input:checked + .j7zh-sw::after { left: 14px; }
+#j7zh-menu .j7zh-label-update-all { width: 100%; margin-top: 5px; }
+#j7zh-menu .j7zh-label-status { color: rgba(199,210,254,.72); line-height: 1.45; overflow-wrap: anywhere; }
 
 /* ===== 点击关键词复制 ===== */
 html.j7zh-copykw .j7zh-kw { cursor: copy; transition: box-shadow .12s ease; pointer-events: auto !important; }

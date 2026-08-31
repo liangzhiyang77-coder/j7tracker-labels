@@ -4,6 +4,8 @@
  *  - 串行 + 最小间隔，429 时整体退避，避免把出口 IP 打进风控
  *  - 小缓存
  */
+importScripts('label-utils.js');
+
 const cache = new Map();
 const CACHE_MAX = 4000;
 function remember(key, val) { if (cache.size >= CACHE_MAX) cache.clear(); cache.set(key, val); }
@@ -97,6 +99,295 @@ async function translateBatch(texts, tl) {
   }
   return { results };
 }
+
+/* =====================================================================
+ * Twitter position 标签
+ * - chrome.storage.local 保存标签和 Frontrun 配置
+ * - chrome.cookies 把用户粘贴的 curl Cookie 写到目标域，再由后台 fetch
+ * - 所有请求串行、每批最多 30 个、随机间隔并在 429/5xx 时退避
+ * ===================================================================== */
+const LABEL = self.J7ZhLabels;
+const LABEL_DATA_KEY = 'j7zh_twitter_labels_v1';
+const LABEL_CONFIG_KEY = 'j7zh_frontrun_config_v1';
+const LABEL_AUTO_KEY = 'j7zh_label_auto_update_v1';
+const LABEL_SEED_FILE = 'twitter-labels.seed.json';
+const LABEL_BATCH_SIZE = 30;
+
+let labelRowsPromise = null;
+let labelMap = new Map();
+let labelRequestChain = Promise.resolve();
+let labelLastRequestAt = 0;
+let labelRate = null;
+let labelJob = { busy: false, phase: 'idle', current: 0, total: 0, updated: 0, error: '' };
+
+async function storageGet(keys) { return chrome.storage.local.get(keys); }
+async function storageSet(values) { return chrome.storage.local.set(values); }
+
+async function loadSeedRows() {
+  const response = await fetch(chrome.runtime.getURL(LABEL_SEED_FILE));
+  if (!response.ok) throw new Error('读取内置标签失败：' + response.status);
+  return LABEL.normalizeRows(await response.json());
+}
+
+async function ensureLabelRows() {
+  if (!labelRowsPromise) {
+    labelRowsPromise = (async () => {
+      const stored = await storageGet(LABEL_DATA_KEY);
+      const hasStored = Object.prototype.hasOwnProperty.call(stored, LABEL_DATA_KEY);
+      const record = stored[LABEL_DATA_KEY];
+      const rows = hasStored ? LABEL.normalizeRows(record && record.rows ? record.rows : record) : await loadSeedRows();
+      labelMap = LABEL.rowsToMap(rows);
+      if (!hasStored) await persistLabelRows();
+      return LABEL.mapToRows(labelMap);
+    })().catch((error) => { labelRowsPromise = null; throw error; });
+  }
+  await labelRowsPromise;
+  return LABEL.mapToRows(labelMap);
+}
+
+async function persistLabelRows() {
+  const rows = LABEL.mapToRows(labelMap);
+  await storageSet({ [LABEL_DATA_KEY]: { version: 1, updatedAt: new Date().toISOString(), rows } });
+  return rows;
+}
+
+async function getPrivateLabelConfig() {
+  const stored = await storageGet(LABEL_CONFIG_KEY);
+  const config = stored[LABEL_CONFIG_KEY];
+  return config && config.endpoint === LABEL.ENDPOINT && Array.isArray(config.cookies) ? config : null;
+}
+
+async function applyFrontrunCookies(config) {
+  let sessionSaved = false;
+  for (const cookie of config.cookies) {
+    const saved = await chrome.cookies.set({
+      url: 'https://loadbalance.frontrun.pro/',
+      name: cookie.name,
+      value: cookie.value,
+      secure: true,
+      sameSite: 'no_restriction',
+      path: '/'
+    });
+    if (cookie.name === '__Secure-frontrun.session_token' && saved) sessionSaved = true;
+  }
+  if (!sessionSaved) throw new Error('session_token 无法写入 Frontrun 域');
+}
+
+async function saveFrontrunConfig(command) {
+  const parsed = LABEL.parseCurlCommand(command);
+  const config = {
+    version: 1,
+    endpoint: parsed.endpoint,
+    cookies: parsed.cookies,
+    headers: parsed.headers,
+    savedAt: new Date().toISOString()
+  };
+  await applyFrontrunCookies(config);
+  await storageSet({ [LABEL_CONFIG_KEY]: config });
+  return { savedAt: config.savedAt, cookieCount: config.cookies.length };
+}
+
+async function publicLabelState() {
+  const rows = await ensureLabelRows();
+  const stored = await storageGet([LABEL_CONFIG_KEY, LABEL_AUTO_KEY]);
+  return {
+    count: rows.length,
+    nonEmpty: rows.filter((row) => row.position).length,
+    configSaved: !!stored[LABEL_CONFIG_KEY],
+    configSavedAt: stored[LABEL_CONFIG_KEY] && stored[LABEL_CONFIG_KEY].savedAt || '',
+    autoUpdate: stored[LABEL_AUTO_KEY] === true,
+    job: Object.assign({}, labelJob),
+    rate: labelRate
+  };
+}
+
+async function broadcastLabelMessage(message) {
+  try {
+    const tabs = await chrome.tabs.query({ url: ['https://j7tracker.io/*', 'https://*.j7tracker.io/*'] });
+    await Promise.all(tabs.map((tab) => chrome.tabs.sendMessage(tab.id, message).catch(() => null)));
+  } catch (e) {}
+}
+
+function parseRateHeaders(response) {
+  const number = (name) => {
+    const value = Number(response.headers.get(name));
+    return Number.isFinite(value) ? value : null;
+  };
+  return {
+    minuteRemaining: number('x-ratelimit-remaining-minute'),
+    hourRemaining: number('x-ratelimit-remaining-hour'),
+    dayRemaining: number('x-ratelimit-remaining-day')
+  };
+}
+
+async function waitForLabelGap(extraMs) {
+  const randomGap = 2500 + Math.floor(Math.random() * 2001) + (extraMs || 0);
+  const wait = labelLastRequestAt ? Math.max(0, labelLastRequestAt + randomGap - Date.now()) : 0;
+  if (wait) await sleep(wait);
+  labelLastRequestAt = Date.now();
+}
+
+async function fetchFrontrunBatch(usernames) {
+  if (!usernames.length || usernames.length > LABEL_BATCH_SIZE) throw new Error('Frontrun 批次必须是 1-30 个 username');
+  const config = await getPrivateLabelConfig();
+  if (!config) throw new Error('请先保存包含 Cookie 的完整 curl 命令');
+  await applyFrontrunCookies(config);
+
+  let lastError = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await waitForLabelGap(attempt ? Math.min(8000, 1000 * (2 ** attempt)) : 0);
+    let response;
+    try {
+      response = await fetch(config.endpoint, {
+        method: 'POST',
+        credentials: 'include',
+        headers: Object.assign({
+          accept: '*/*',
+          'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+          'content-type': 'application/json',
+          'x-copilot-client-language': 'ZH_CN',
+          'x-copilot-client-version': '0.0.382'
+        }, config.headers || {}),
+        body: JSON.stringify({ twitterUsernames: usernames })
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) continue;
+      throw error;
+    }
+
+    labelRate = parseRateHeaders(response);
+    const text = await response.text();
+    if (response.ok) {
+      let payload;
+      try { payload = JSON.parse(text); } catch (e) { throw new Error('Frontrun 返回了无效 JSON'); }
+      if (!payload || payload.status !== true || !Array.isArray(payload.data)) throw new Error('Frontrun 返回结构异常');
+      return LABEL.normalizeRows(payload.data);
+    }
+
+    if (response.status === 401 || response.status === 403) throw new Error('Frontrun Cookie 已失效或无权限（' + response.status + '）');
+    if (response.status === 429) {
+      const reset = Math.max(5, Math.min(90, Number(response.headers.get('x-ratelimit-reset-minute')) || 60));
+      lastError = new Error('Frontrun 请求过于频繁，等待 ' + reset + ' 秒');
+      if (attempt < 3) { await sleep((reset + 1) * 1000); continue; }
+    } else if (response.status >= 500 && attempt < 3) {
+      lastError = new Error('Frontrun 暂时不可用（' + response.status + '）');
+      continue;
+    } else {
+      throw new Error('Frontrun 请求失败（' + response.status + '）：' + text.slice(0, 160));
+    }
+  }
+  throw lastError || new Error('Frontrun 请求失败');
+}
+
+function enqueueLabelTask(task) {
+  const next = labelRequestChain.then(task, task);
+  labelRequestChain = next.catch(() => null);
+  return next;
+}
+
+async function queryAndMergeLabels(usernames, options) {
+  await ensureLabelRows();
+  const seen = new Set();
+  let names = usernames.map(LABEL.normalizeUsername).filter((name) => {
+    const key = name.toLowerCase();
+    if (!name || seen.has(key)) return false;
+    seen.add(key);
+    return !(options && options.missingOnly && labelMap.has(key));
+  });
+  if (!names.length) return [];
+
+  const batches = LABEL.chunk(names, LABEL_BATCH_SIZE);
+  const changed = [];
+  let done = 0;
+  for (const batch of batches) {
+    const rows = await fetchFrontrunBatch(batch);
+    const returned = new Set(rows.map((row) => row.twitterUsername.toLowerCase()));
+    for (const row of rows) {
+      labelMap.set(row.twitterUsername.toLowerCase(), row);
+      changed.push(row);
+    }
+    // 自动补全时，把接口明确未返回的 username 记成空记录，避免页面轮询反复请求。
+    // 全量刷新则保留原值，防止接口偶发漏项把已有备注清空。
+    if (options && options.missingOnly) {
+      for (const username of batch) {
+        const key = username.toLowerCase();
+        if (returned.has(key)) continue;
+        const emptyRow = { twitterUsername: username, position: '' };
+        labelMap.set(key, emptyRow);
+        changed.push(emptyRow);
+      }
+    }
+    done += batch.length;
+    await persistLabelRows();
+    if (options && options.phase) {
+      labelJob.current = Math.min(labelJob.total, (options.base || 0) + done);
+      labelJob.updated += rows.length;
+      await broadcastLabelMessage({ type: 'j7zh-label-progress', state: await publicLabelState() });
+    }
+  }
+  if (changed.length) await broadcastLabelMessage({ type: 'j7zh-labels-changed', rows: changed, state: await publicLabelState() });
+  return changed;
+}
+
+async function importLabelRows(input) {
+  await ensureLabelRows();
+  const rows = LABEL.normalizeRows(input);
+  if (!rows.length) throw new Error('导入文件里没有有效的 twitterUsername/position');
+  for (const row of rows) labelMap.set(row.twitterUsername.toLowerCase(), row);
+  await persistLabelRows();
+  await broadcastLabelMessage({ type: 'j7zh-labels-changed', rows, state: await publicLabelState() });
+  return { imported: rows.length, state: await publicLabelState() };
+}
+
+async function queryMissingLabels(usernames) {
+  const stored = await storageGet([LABEL_AUTO_KEY, LABEL_CONFIG_KEY]);
+  if (stored[LABEL_AUTO_KEY] !== true) return { skipped: 'disabled', rows: [] };
+  if (!stored[LABEL_CONFIG_KEY]) return { skipped: 'no-config', rows: [] };
+  const rows = await enqueueLabelTask(() => queryAndMergeLabels(usernames, { missingOnly: true }));
+  return { rows, state: await publicLabelState() };
+}
+
+async function startFullLabelUpdate() {
+  if (labelJob.busy) return { started: false, state: await publicLabelState() };
+  if (!(await getPrivateLabelConfig())) throw new Error('请先保存包含 Cookie 的完整 curl 命令');
+  const rows = await ensureLabelRows();
+  const usernames = rows.map((row) => row.twitterUsername);
+  labelJob = { busy: true, phase: 'all', current: 0, total: usernames.length, updated: 0, error: '' };
+  await broadcastLabelMessage({ type: 'j7zh-label-progress', state: await publicLabelState() });
+  enqueueLabelTask(() => queryAndMergeLabels(usernames, { phase: 'all', missingOnly: false }))
+    .then(() => { labelJob.busy = false; labelJob.phase = 'done'; labelJob.current = labelJob.total; })
+    .catch((error) => { labelJob.busy = false; labelJob.phase = 'error'; labelJob.error = String(error && error.message || error); })
+    .finally(async () => { await broadcastLabelMessage({ type: 'j7zh-label-progress', state: await publicLabelState() }); });
+  return { started: true, state: await publicLabelState() };
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg.type !== 'string' || !msg.type.startsWith('j7zh-label')) return false;
+  (async () => {
+    switch (msg.type) {
+      case 'j7zh-labels-get':
+        return { rows: await ensureLabelRows(), state: await publicLabelState() };
+      case 'j7zh-labels-export':
+        return { rows: await ensureLabelRows(), state: await publicLabelState() };
+      case 'j7zh-labels-import':
+        return importLabelRows(msg.data);
+      case 'j7zh-label-config-save':
+        return { config: await saveFrontrunConfig(String(msg.command || '')), state: await publicLabelState() };
+      case 'j7zh-label-auto-set':
+        await storageSet({ [LABEL_AUTO_KEY]: msg.enabled === true });
+        return { state: await publicLabelState() };
+      case 'j7zh-label-query-missing':
+        return queryMissingLabels(Array.isArray(msg.usernames) ? msg.usernames : []);
+      case 'j7zh-label-update-all':
+        return startFullLabelUpdate();
+      default:
+        throw new Error('未知标签操作');
+    }
+  })().then((result) => sendResponse({ ok: true, result }))
+    .catch((error) => sendResponse({ ok: false, error: String(error && error.message || error) }));
+  return true;
+});
 
 /* ---- GMGN 后台搜索：不抢焦点地打开/复用 gmgn.ai 标签页 ---- */
 async function gmgnSearch(q, sender) {

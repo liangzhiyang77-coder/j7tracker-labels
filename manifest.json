@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "J7Tracker 中文界面",
   "short_name": "J7 中文",
-  "version": "1.5.1",
-  "description": "j7tracker.io 中文化：界面汉化 + 阅读模式 + 正文自动翻译 + 点关键词复制并一键 GMGN 搜索。右下角「中」按钮开关。",
+  "version": "1.6.0",
+  "description": "j7tracker.io 中文化、正文翻译、关键词工具与 Twitter 作者标签。支持导入导出及从 Frontrun 更新标签。",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -11,7 +11,7 @@
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_title": "J7Tracker 中文界面：在 j7tracker.io 页面右下角点「中」打开开关菜单",
+    "default_title": "J7Tracker 中文扩展：在 j7tracker.io 页面右下角点「中」打开功能菜单",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -24,7 +24,8 @@
   },
   "host_permissions": [
     "https://translate.googleapis.com/*",
-    "https://clients5.google.com/*"
+    "https://clients5.google.com/*",
+    "https://loadbalance.frontrun.pro/*"
   ],
   "content_scripts": [
     {
@@ -33,6 +34,7 @@
         "https://*.j7tracker.io/*"
       ],
       "js": [
+        "label-utils.js",
         "dict.js",
         "content.js"
       ],
@@ -67,6 +69,8 @@
     }
   ],
   "permissions": [
-    "tabs"
+    "tabs",
+    "storage",
+    "cookies"
   ]
 }
