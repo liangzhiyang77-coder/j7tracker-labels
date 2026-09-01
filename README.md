@@ -34,6 +34,8 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 
 当前内置备注数据库来自 **Frontrun 的日常使用记录**，不属于 J7Tracker 官方数据。每条 JSON 记录都带来源字段：`FRONTRUN` 表示 Frontrun 数据，`USER` 表示用户本地新增或修改。用户备注优先显示，后续 Frontrun 更新不会覆盖；点击「恢复 Frontrun」可回到原备注。
 
+![J7 中文扩展设置与 Twitter 标签更新面板](docs/images/twitter-label-settings-panel.png)
+
 ![单条 Twitter 作者标签效果](docs/images/twitter-label-example-card.png)
 
 ![J7 信息流中的 Twitter 作者标签效果](docs/images/twitter-label-example-feed.png)
