@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "J7Tracker 中文界面",
   "short_name": "J7 中文",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "j7tracker.io 中文化、正文翻译、关键词工具与 Twitter 作者标签。支持用户备注编辑、导入导出及 Frontrun 更新。",
   "icons": {
     "16": "icons/icon16.png",

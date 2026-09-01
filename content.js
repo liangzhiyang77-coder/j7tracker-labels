@@ -1114,8 +1114,11 @@
     const queued = LABELS.missing.size + LABELS.pending.size;
     let summary = '自动累计更新 ' + LABELS.autoUpdatedCount + ' 个；待批量 ' + queued + ' 个；Cookie ' + (LABELS.configSaved ? '已保存' : '未保存');
     if (LABELS.batchDueAt > Date.now()) summary += '；约 ' + Math.ceil((LABELS.batchDueAt - Date.now()) / 1000) + ' 秒后发送';
-    if (LABELS.autoPauseUntil > Date.now()) summary += '；冷却剩余 ' + Math.ceil((LABELS.autoPauseUntil - Date.now()) / 60000) + ' 分钟';
-    if (LABELS.rate && LABELS.rate.minuteRemaining != null) summary += '；分钟余量 ' + LABELS.rate.minuteRemaining;
+    if (LABELS.autoPauseUntil > Date.now()) {
+      const cooldownMs = LABELS.autoPauseUntil - Date.now();
+      summary += cooldownMs < 120000 ? '；冷却剩余 ' + Math.ceil(cooldownMs / 1000) + ' 秒' : '；冷却剩余 ' + Math.ceil(cooldownMs / 60000) + ' 分钟';
+    }
+    if (LABELS.rate) summary += '；分钟余量 ' + (LABELS.rate.minuteRemaining == null ? '未知' : LABELS.rate.minuteRemaining);
     let detail = '';
     if (job.busy) detail = '全部更新中：' + (job.current || 0) + ' / ' + (job.total || LABELS.count) + '（已返回 ' + (job.updated || 0) + '）';
     else if (job.phase === 'error' && job.error) detail = '更新失败：' + job.error;

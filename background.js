@@ -382,7 +382,9 @@ async function broadcastLabelMessage(message) {
 
 function parseRateHeaders(response) {
   const number = (name) => {
-    const value = Number(response.headers.get(name));
+    const raw = response.headers.get(name);
+    if (raw == null || String(raw).trim() === '') return null;
+    const value = Number(raw);
     return Number.isFinite(value) ? value : null;
   };
   return {
@@ -390,6 +392,40 @@ function parseRateHeaders(response) {
     hourRemaining: number('x-ratelimit-remaining-hour'),
     dayRemaining: number('x-ratelimit-remaining-day')
   };
+}
+
+function rateLimitResetSeconds(response) {
+  const raw = response.headers.get('x-ratelimit-reset-minute');
+  const seconds = raw == null || String(raw).trim() === '' ? 60 : Number(raw);
+  return Math.max(5, Math.min(300, Number.isFinite(seconds) ? seconds : 60));
+}
+
+function createRateLimitError(response) {
+  const resetSeconds = rateLimitResetSeconds(response);
+  const error = new Error('Frontrun 分钟请求额度暂不可用，约 ' + resetSeconds + ' 秒后再试');
+  error.status = 429;
+  error.rateLimited = true;
+  error.retryAfterMs = (resetSeconds + 1) * 1000;
+  return error;
+}
+
+function rateLimitWaitMs(error) {
+  return Math.max(5000, Number(error && error.retryAfterMs) || 61000);
+}
+
+async function rememberRateLimit(error) {
+  const warning = String(error && error.message || error);
+  try { await updateAutoStats({ pauseUntil: Date.now() + rateLimitWaitMs(error), lastError: warning }); } catch (statsError) {}
+  return warning;
+}
+
+function responseErrorDetail(text) {
+  try {
+    const payload = JSON.parse(text);
+    const message = payload && (payload.message || payload.error);
+    if (message) return String(message).slice(0, 120);
+  } catch (error) {}
+  return String(text || '').trim().slice(0, 120);
 }
 
 async function waitForLabelGap(extraMs) {
@@ -441,7 +477,9 @@ async function fetchFrontrunBatch(usernames, context) {
       let payload;
       try { payload = JSON.parse(text); } catch (e) { throw new Error('Frontrun 返回了无效 JSON'); }
       if (!payload || payload.status !== true || !Array.isArray(payload.data)) throw new Error('Frontrun 返回结构异常');
-      return LABEL.normalizeRows(payload.data);
+      const rows = LABEL.normalizeRows(payload.data);
+      // 当前成功批次仍应落盘；携带此信号，让上层在落盘后停止后续批次。
+      return { rows, rateLimitError: labelRate.minuteRemaining === 0 ? createRateLimitError(response) : null };
     }
 
     if (response.status === 401 || response.status === 403) {
@@ -450,11 +488,12 @@ async function fetchFrontrunBatch(usernames, context) {
       throw error;
     }
     if (response.status === 429) {
-      const reset = Math.max(5, Math.min(90, Number(response.headers.get('x-ratelimit-reset-minute')) || 60));
-      lastError = new Error('Frontrun 请求过于频繁，等待 ' + reset + ' 秒');
-      if (attempt < 3) { await sleep((reset + 1) * 1000); continue; }
+      throw createRateLimitError(response);
     } else if (response.status >= 500) {
-      lastError = new Error('Frontrun 服务器错误（' + response.status + '）');
+      // 部分 Frontrun 节点会在额度为 0 时错误返回 5xx；仅在 5xx 上使用这个兼容判断。
+      if (labelRate.minuteRemaining === 0) throw createRateLimitError(response);
+      const detail = responseErrorDetail(text);
+      lastError = new Error('Frontrun 服务器错误（' + response.status + '）' + (detail ? '：' + detail : ''));
       lastError.status = response.status;
       if (attempt < 2) continue;
       throw lastError;
@@ -488,7 +527,8 @@ async function queryAndMergeLabels(usernames, options) {
   const batches = LABEL.chunk(names, LABEL_BATCH_SIZE);
   const changed = [];
   let done = 0;
-  for (const batch of batches) {
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+    const batch = batches[batchIndex];
     assertRequestCurrent(options && options.context);
     if (options && options.countAuto) {
       const stored = await storageGet([LABEL_AUTO_KEY, LABEL_AUTO_STATS_KEY]);
@@ -497,7 +537,8 @@ async function queryAndMergeLabels(usernames, options) {
       const stats = normalizeAutoStats(stored[LABEL_AUTO_STATS_KEY]);
       if (stats.pauseUntil > Date.now()) throw cancelledLabelRequest('自动补查正在冷却');
     }
-    const rows = await fetchFrontrunBatch(batch, options && options.context);
+    const batchResult = await fetchFrontrunBatch(batch, options && options.context);
+    const rows = batchResult.rows;
     // Cookie/自动开关可能在响应返回与落盘之间改变；旧响应绝不能覆盖本地 JSON 或页面。
     assertRequestCurrent(options && options.context);
     const batchChanged = [];
@@ -530,6 +571,15 @@ async function queryAndMergeLabels(usernames, options) {
       labelJob.current = Math.min(labelJob.total, (options.base || 0) + done);
       labelJob.updated += rows.length;
       await broadcastLabelMessage({ type: 'j7zh-label-progress', state: await publicLabelState() });
+    }
+    if (batchResult.rateLimitError) {
+      // 全量更新恰好在最后一批用完额度时，任务本身已经完整成功，不应误报失败。
+      if (!(options && options.countAuto) && batchIndex === batches.length - 1) {
+        await rememberRateLimit(batchResult.rateLimitError);
+        continue;
+      }
+      batchResult.rateLimitError.rows = changed.slice();
+      throw batchResult.rateLimitError;
     }
   }
   return changed;
@@ -621,6 +671,10 @@ async function queryMissingLabels(usernames) {
       return { rows: await queryAndMergeLabels(usernames, { missingOnly: true, emptyTtlHours, countAuto: true, context }) };
     } catch (error) {
       if (error && error.cancelled) return { skipped: 'cancelled', rows: [] };
+      if (error && error.rateLimited) {
+        const warning = await rememberRateLimit(error);
+        return { skipped: 'rate-limit', warning, rows: Array.isArray(error.rows) ? error.rows : [] };
+      }
       if (Number(error && error.status) >= 500) {
         const warning = String(error.message || error) + '，自动补查暂停 5 分钟后再试';
         await updateAutoStats({ pauseUntil: Date.now() + LABEL_AUTO_ERROR_COOLDOWN_MS, lastError: warning });
@@ -642,7 +696,8 @@ async function startFullLabelUpdate() {
   const context = requestContext(false);
   enqueueLabelTask(() => queryAndMergeLabels(usernames, { phase: 'all', missingOnly: false, context }))
     .then(() => { labelJob.busy = false; labelJob.phase = 'done'; labelJob.current = labelJob.total; })
-    .catch((error) => {
+    .catch(async (error) => {
+      if (error && error.rateLimited) await rememberRateLimit(error);
       labelJob.busy = false;
       labelJob.phase = error && error.cancelled ? 'cancelled' : 'error';
       labelJob.error = error && error.cancelled ? '' : String(error && error.message || error);
