@@ -1,0 +1,21 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "origin",
+          "operation": "remove"
+        }
+      ]
+    },
+    "condition": {
+      "urlFilter": "|https://loadbalance.frontrun.pro/api/v2/twitter/info/batch-query-light|",
+      "resourceTypes": [
+        "xmlhttprequest"
+      ]
+    }
+  }
+]

@@ -47,6 +47,8 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 7. Frontrun 也没有备注时会记录本次查询时间，在可配置的空结果 TTL 内不再重复请求（默认 24 小时，范围 1–8760 小时）；TTL 到期且再次刷到该账号时才重新查询。只有响应头明确报告分钟余量为 `0` 或返回 429 时才按限流窗口暂停；缺少限流响应头会显示为未知，不再误报为 `0`。真正的 500 服务器错误会显示服务端信息并冷却 5 分钟，避免循环请求。
 8. 「全部更新」按每批最多 20 个、串行随机间隔刷新当前全部账号。面板会显示进度和接口剩余额度。
 
+由于 Frontrun 会对非原版扩展的 `Origin` 返回 500，本扩展使用一条静态网络规则，仅在请求上述完整 API 地址时移除 `Origin`。规则不会匹配其他 Frontrun 路径、J7Tracker、Twitter 或翻译请求。
+
 数据示例：
 
 ```json
@@ -83,6 +85,7 @@ Frontrun Cookie 只保存在 `chrome.storage.local` 和目标域 Cookie 存储�
 | `manifest.json` | MV3 清单，只在 `*.j7tracker.io` 运行 |
 | `label-utils.js` | username、导入数据、cURL/Cookie 和批次的纯逻辑解析，供 content 与 background 共用 |
 | `twitter-labels.seed.json` | 内置的 1493 个 `twitterUsername` / `position` / `source: FRONTRUN` 初始记录 |
+| `rules/frontrun-origin.json` | 仅对 Frontrun 标签 API 移除扩展 `Origin` 的静态网络规则 |
 | `dict.js` | 英→中字典：`exact` 精确匹配、`regex` 带数字/变量的模式（含 12→24 小时制转换）、`context` 推文头部动词、`inButton` 按钮内特殊译法 |
 | `content.js` | 界面汉化引擎、正文翻译调度、作者标签注入和右下角菜单 |
 | `background.js` | service worker：代发 Google 翻译请求；持久化标签与 Frontrun 配置；串行批量更新、退避和进度广播 |
