@@ -138,6 +138,50 @@ html.j7zh-reader .profile-card { max-width: 520px !important; }
   vertical-align: middle;
   word-break: keep-all;
 }
+.j7zh-ca-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: 4px;
+  padding: 2px 6px;
+  border: 1px solid rgba(148,163,184,.55);
+  border-radius: 4px;
+  color: #cbd5e1;
+  background: rgba(15,23,42,.72);
+  font: 600 12px/1.25 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.j7zh-ca-badge.has { border-color: rgba(245,158,11,.8); color: #fcd34d; }
+.j7zh-ca-badge.none { border-color: rgba(52,211,153,.7); color: #6ee7b7; }
+.j7zh-ca-pop {
+  position: fixed;
+  z-index: 2147483646;
+  max-width: min(520px, calc(100vw - 16px));
+  max-height: 280px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid rgba(148,163,184,.4);
+  border-radius: 10px;
+  background: #111827;
+  box-shadow: 0 12px 32px rgba(0,0,0,.45);
+}
+.j7zh-ca-pop-title, .j7zh-ca-pop-empty { color: #e5e7eb; font: 600 12px/1.4 "Microsoft YaHei", sans-serif; margin-bottom: 6px; }
+.j7zh-ca-pop-row {
+  display: block;
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #f8fafc;
+  font: 12px/1.4 Consolas, "Microsoft YaHei", monospace;
+  text-align: left;
+  cursor: pointer;
+}
+.j7zh-ca-pop-row:hover { background: rgba(255,255,255,.08); }
 .j7zh-label-edit {
   display: inline-flex;
   align-items: center;

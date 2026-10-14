@@ -706,6 +706,200 @@ async function startFullLabelUpdate() {
   return { started: true, state: await publicLabelState() };
 }
 
+const CA_DATA_KEY = 'j7zh_ca_history_v1';
+const CA_TTL_MS = 6 * 60 * 60 * 1000;
+const CA_PENDING_TTL_MS = 90 * 1000;
+let caMap = null;
+
+async function ensureCaMap() {
+  if (caMap) return caMap;
+  const stored = await storageGet(CA_DATA_KEY);
+  const rows = stored[CA_DATA_KEY] && stored[CA_DATA_KEY].rows;
+  caMap = new Map();
+  if (Array.isArray(rows)) {
+    for (const row of rows) {
+      if (row && row.username) caMap.set(String(row.username).toLowerCase(), row);
+    }
+  }
+  return caMap;
+}
+
+function rememberCaRow(row) {
+  const key = String(row.username).toLowerCase();
+  caMap.delete(key);
+  caMap.set(key, row);
+}
+
+async function persistCaMap() {
+  const keep = [...caMap.values()].slice(-400);
+  caMap = new Map(keep.map((row) => [String(row.username).toLowerCase(), row]));
+  await storageSet({ [CA_DATA_KEY]: { version: 1, rows: keep } });
+}
+
+function caHistoryUrl(username) {
+  return 'https://loadbalance.frontrun.pro/api/v3/twitter/' + encodeURIComponent(username) + '/tweets-with-ca-cache';
+}
+
+function caFresh(row) {
+  if (!row || !row.fetchedAt) return false;
+  const age = Date.now() - row.fetchedAt;
+  if (row.error) return age < 5 * 60 * 1000;
+  if (row.pending) return age < CA_PENDING_TTL_MS;
+  return age < CA_TTL_MS;
+}
+
+function caHistoryBody(payload) {
+  const data = payload && payload.data;
+  const candidates = [];
+  if (data && typeof data === 'object') {
+    if (data.data && typeof data.data === 'object') candidates.push(data.data);
+    candidates.push(data);
+  }
+  for (const obj of candidates) {
+    if (obj.undeletedCACount != null || obj.deletedCACount != null || Array.isArray(obj.topUndeletedTweets) || Array.isArray(obj.topDeletedTweets)) return obj;
+  }
+  return null;
+}
+
+function pushCaItem(items, seen, row, deleted) {
+  if (!row || typeof row !== 'object' || items.length >= 12) return;
+  const ca = String(row.ca || row.contractAddress || row.mint || row.address || '').trim();
+  if (!ca || seen.has(ca.toLowerCase())) return;
+  seen.add(ca.toLowerCase());
+  items.push({
+    ca,
+    chain: String(row.chain || ''),
+    time: row.tweetTime || row.time || '',
+    deleted: deleted || row.isDeleted === true,
+    tweetId: String(row.tweetId || row.id || '')
+  });
+}
+
+function normalizeCaPayload(username, payload) {
+  const inner = caHistoryBody(payload);
+  if (!inner) {
+    return { username, fetchedAt: Date.now(), pending: true, undeleted: 0, deleted: 0, items: [], error: '' };
+  }
+  const items = [];
+  const seen = new Set();
+  // 钱包提及列表里的 ca 是钱包地址，不放进发盘记录。同一合约两边都有时算未删。
+  for (const row of Array.isArray(inner.topUndeletedTweets) ? inner.topUndeletedTweets : []) pushCaItem(items, seen, row, false);
+  for (const row of Array.isArray(inner.topDeletedTweets) ? inner.topDeletedTweets : []) pushCaItem(items, seen, row, true);
+  const undeleted = Number(inner.undeletedCACount);
+  const deleted = Number(inner.deletedCACount);
+  return {
+    username,
+    fetchedAt: Date.now(),
+    pending: false,
+    undeleted: Number.isFinite(undeleted) ? undeleted : items.filter((item) => !item.deleted).length,
+    deleted: Number.isFinite(deleted) ? deleted : items.filter((item) => item.deleted).length,
+    items,
+    error: ''
+  };
+}
+
+function caFailRow(username, error) {
+  return {
+    username,
+    fetchedAt: Date.now(),
+    pending: false,
+    undeleted: 0,
+    deleted: 0,
+    items: [],
+    error: String(error && error.message || error).slice(0, 180)
+  };
+}
+
+async function fetchOneCa(username, context) {
+  assertRequestCurrent(context);
+  const config = await loadAndApplyFrontrunConfig(context);
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await waitForLabelGap(attempt ? Math.min(8000, 1000 * (2 ** attempt)) : 0);
+    assertRequestCurrent(context);
+    const controller = new AbortController();
+    labelFetchControllers.set(controller, { auto: false });
+    let response;
+    try {
+      response = await fetch(caHistoryUrl(username), {
+        method: 'GET',
+        credentials: 'include',
+        signal: controller.signal,
+        headers: Object.assign({
+          accept: '*/*',
+          'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+          'x-copilot-client-language': 'ZH_CN',
+          'x-copilot-client-version': '0.0.382'
+        }, config.headers || {})
+      });
+    } catch (error) {
+      if (controller.signal.aborted || (error && error.name === 'AbortError')) throw cancelledLabelRequest();
+      lastError = error;
+      if (attempt < 2) continue;
+      throw error;
+    } finally {
+      labelFetchControllers.delete(controller);
+    }
+    const text = await response.text();
+    if (response.status === 401 || response.status === 403) {
+      const error = new Error('Frontrun Cookie 已失效或无权限（' + response.status + '）');
+      error.status = response.status;
+      throw error;
+    }
+    if (response.status === 429) throw createRateLimitError(response);
+    if (response.ok) {
+      let payload;
+      try { payload = JSON.parse(text); } catch (error) { throw new Error('历史 CA 返回了无效 JSON'); }
+      if (payload && payload.status === false) throw new Error(String(payload.message || '历史 CA 查询失败'));
+      return normalizeCaPayload(username, payload);
+    }
+    if (response.status >= 500) {
+      labelRate = parseRateHeaders(response);
+      if (labelRate.minuteRemaining === 0) throw createRateLimitError(response);
+      const detail = responseErrorDetail(text);
+      lastError = new Error('历史 CA 请求失败（' + response.status + '）' + (detail ? '：' + detail : ''));
+      lastError.status = response.status;
+      if (attempt < 2) continue;
+      throw lastError;
+    }
+    throw new Error('历史 CA 请求失败（' + response.status + '）');
+  }
+  throw lastError || new Error('历史 CA 请求失败');
+}
+
+async function storeCaRow(row) {
+  rememberCaRow(row);
+  await persistCaMap();
+  await broadcastLabelMessage({ type: 'j7zh-ca-changed', rows: [row] });
+}
+
+async function fetchCaUsernames(usernames) {
+  await ensureCaMap();
+  const context = requestContext(false);
+  const changed = [];
+  for (let index = 0; index < usernames.length; index++) {
+    const username = usernames[index];
+    try {
+      assertRequestCurrent(context);
+      const row = await fetchOneCa(username, context);
+      await storeCaRow(row);
+      changed.push(row);
+    } catch (error) {
+      if (error && error.cancelled) throw error;
+      const stop = error && (error.rateLimited || error.status === 401 || error.status === 403);
+      if (error && error.rateLimited) await rememberRateLimit(error);
+      const rest = stop ? usernames.slice(index) : [username];
+      for (const name of rest) {
+        const row = caFailRow(name, error);
+        await storeCaRow(row);
+        changed.push(row);
+      }
+      if (stop) break;
+    }
+  }
+  return changed;
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg.type !== 'string' || !msg.type.startsWith('j7zh-label')) return false;
   (async () => {
@@ -731,6 +925,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { state: await publicLabelState() };
       case 'j7zh-label-query-missing':
         return queryMissingLabels(Array.isArray(msg.usernames) ? msg.usernames : []);
+      case 'j7zh-label-ca-get': {
+        const names = (Array.isArray(msg.usernames) ? msg.usernames : [])
+          .map((name) => LABEL.normalizeUsername(name))
+          .filter(Boolean)
+          .slice(0, 8);
+        await ensureCaMap();
+        const cached = [];
+        const missing = [];
+        for (const name of names) {
+          const row = caMap.get(name.toLowerCase());
+          if (caFresh(row)) cached.push(row);
+          else missing.push(name);
+        }
+        if (missing.length && await getPrivateLabelConfig()) {
+          enqueueLabelTask(() => fetchCaUsernames(missing)).catch(async (error) => {
+            if (error && error.cancelled) return;
+            await ensureCaMap();
+            const row = caFailRow(missing[0], error);
+            try { await storeCaRow(row); } catch (persistError) {}
+          });
+        }
+        return { rows: cached, queued: missing.length };
+      }
       case 'j7zh-label-update-all':
         return startFullLabelUpdate();
       default:

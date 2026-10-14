@@ -12,6 +12,7 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 | **复制后 GMGN 搜索** | 点关键词后在**后台**打开/复用 GMGN（gmgn.ai）标签页并在其搜索弹窗填入该词——不切走焦点，人留在 j7 继续看流，想看结果自己切过去（配合浏览器分屏体验最佳）。始终复用同一个标签页，不会越开越多。GMGN 首次打开搜索弹窗要求可信事件，本扩展通过直接调用其 React `onFocus` 处理函数绕过（`gmgn.js` 以 MAIN world 注入）；后台打开由 service worker 的 `tabs` API 完成（因此声明了 `tabs` 权限）。已有 GMGN 页时**不做任何导航**——background 经 `gmgn-bridge.js` 直接发消息给页面原地换搜索词，零刷新 |
 | **正文翻译** | 推文 / 引用 / 回复 / 资料简介自动翻成中文，以「译」块附在原文下方。默认走 **Chrome 内置离线翻译**（Translator API，快、无限流、不出网），Google 网页接口兜底；带本地缓存，刷新不重翻 |
 | **Twitter 标签备注** | 按 username 在作者时间后显示备注。内置 1493 个 Frontrun 日常使用记录，支持卡片快捷编辑、集中增删改查、JSON 导入/导出、缺失账号自动补全和全部更新 |
+| **历史 CA** | 标签打开且已保存 Frontrun cURL 时，作者旁显示这个号发过的合约。未删和已删都算。点开可复制合约、链和日期 |
 
 ## 安装
 
@@ -49,7 +50,18 @@ J7Tracker 是一个实时社媒追踪器，但界面全英文、卡片巨宽、�
 7. Frontrun 也没有备注时会记录本次查询时间，在可配置的空结果 TTL 内不再重复请求（默认 24 小时，范围 1–8760 小时）；TTL 到期且再次刷到该账号时才重新查询。只有响应头明确报告分钟余量为 `0` 或返回 429 时才按限流窗口暂停；缺少限流响应头会显示为未知，不再误报为 `0`。真正的 500 服务器错误会显示服务端信息并冷却 5 分钟，避免循环请求。
 8. 「全部更新」按每批最多 20 个、串行随机间隔刷新当前全部账号。面板会显示进度和接口剩余额度。
 
-由于 Frontrun 会对非原版扩展的 `Origin` 返回 500，本扩展使用一条静态网络规则，仅在请求上述完整 API 地址时移除 `Origin`。规则不会匹配其他 Frontrun 路径、J7Tracker、Twitter 或翻译请求。
+### 历史 CA
+
+本地 1.9.0 在作者标签旁增加历史合约。打开「Twitter 标签备注」并且已经保存 Frontrun cURL 之后，刷到一个作者就会排队查询 `GET /api/v3/twitter/{username}/tweets-with-ca-cache`。
+
+- 角标 `历史CA N`：未删条数加已删条数。有任意一条就表示这个号发过盘。
+- `未发CA`：两边计数都是 0。
+- `CA索引中`：响应里还没有计数字段，90 秒后重试。
+- 点角标列出最多 12 条合约（链、地址、日期）。已删的前面带「删」。点一行复制地址。
+- 钱包提及列表不放进这个角标。
+- 和标签更新共用一条请求队列。成功缓存 6 小时，失败 5 分钟不显示角标。
+
+由于 Frontrun 会对非原版扩展的 `Origin` 返回 500，本扩展用两条静态网络规则移除 `Origin`：一条只匹配标签接口 `batch-query-light`，另一条匹配 `https://loadbalance.frontrun.pro/api/v3/twitter/` 下的历史 CA 请求。规则不匹配 J7Tracker、Twitter 或翻译请求。
 
 数据示例：
 
@@ -77,7 +89,8 @@ Frontrun Cookie 只保存在 `chrome.storage.local` 和目标域 Cookie 存储�
 
 - 界面汉化、阅读模式：纯本地，不发任何请求。
 - 正文翻译用本地引擎时：不出网。仅当本地不可用 / 语种不支持 / 手动选了 Google 时，推文文本（公开内容，不含你的账号信息）会发给 Google 翻译接口。
-- Twitter 标签和用户自定义备注默认只读本地数据。只有用户保存 Frontrun cURL 并主动开启自动补全或点击全部更新时，扩展才向 `loadbalance.frontrun.pro` 发送公开的 Twitter username。
+- Twitter 标签和用户自定义备注默认只读本地数据。只有用户保存 Frontrun cURL 并主动开启自动补全或点击全部更新时，扩展才向 `loadbalance.frontrun.pro` 发送公开的 Twitter username 做标签查询。
+- 历史 CA 同样只在已保存这份 cURL、且页面打开了 Twitter 标签时，按当前可见作者去查公开 username。Cookie 不进入标签 JSON，也不出现在导出文件里。
 - `host_permissions` 声明两个 Google 翻译域名和 Frontrun 标签接口；`gmgn.js` 只在带 `#j7q=` 标记时动作。扩展不收集、不上报其他数据。
 
 ## 文件说明
@@ -87,10 +100,10 @@ Frontrun Cookie 只保存在 `chrome.storage.local` 和目标域 Cookie 存储�
 | `manifest.json` | MV3 清单，只在 `*.j7tracker.io` 运行 |
 | `label-utils.js` | username、导入数据、cURL/Cookie 和批次的纯逻辑解析，供 content 与 background 共用 |
 | `twitter-labels.seed.json` | 内置的 1493 个 `twitterUsername` / `position` / `source: FRONTRUN` 初始记录 |
-| `rules/frontrun-origin.json` | 仅对 Frontrun 标签 API 移除扩展 `Origin` 的静态网络规则 |
+| `rules/frontrun-origin.json` | 对 Frontrun 标签接口和历史 CA 接口移除扩展 `Origin` 的静态网络规则 |
 | `dict.js` | 英→中字典：`exact` 精确匹配、`regex` 带数字/变量的模式（含 12→24 小时制转换）、`context` 推文头部动词、`inButton` 按钮内特殊译法 |
 | `content.js` | 界面汉化引擎、正文翻译调度、作者标签注入和右下角菜单 |
-| `background.js` | service worker：代发 Google 翻译请求；持久化标签与 Frontrun 配置；串行批量更新、退避和进度广播 |
+| `background.js` | service worker：代发 Google 翻译请求；持久化标签与 Frontrun 配置；串行批量更新、退避和进度广播；历史 CA 查询与 6 小时缓存 |
 | `gmgn.js` | 注入 gmgn.ai（MAIN world）：自动打开搜索弹窗并填入关键词；入口有三个——首载 `#j7q=`、hashchange（兜底）、bridge 消息（常规，零导航） |
 | `gmgn-bridge.js` | 注入 gmgn.ai（isolated world）的消息桥：把 background 的搜索指令 postMessage 给 MAIN world 的 `gmgn.js` |
 | `style.css` | 阅读模式、译文块、菜单样式；以及让中文按钮按整词排版（CJK 会被 flex 拆成单字竖排）的 `word-break: keep-all` |

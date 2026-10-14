@@ -671,6 +671,7 @@
     batchDueAt: 0,
     status: ''
   };
+  const CA = { map: new Map(), pending: new Set(), timer: null };
   const AUTHOR_SEL = '.tweet-author, .quoted-author, .nested-quoted-author, .pinned-tweet-author';
   const LABEL_AUTO_BATCH_MIN_MS = 5000;
   const LABEL_AUTO_BATCH_MAX_MS = 10000;
@@ -908,6 +909,134 @@
     renderLabelPanelState();
   }
 
+  function closeCaPopover() {
+    const pop = document.getElementById('j7zh-ca-pop');
+    if (pop) pop.remove();
+  }
+
+  document.addEventListener('mousedown', (event) => {
+    const pop = document.getElementById('j7zh-ca-pop');
+    if (!pop || pop.contains(event.target)) return;
+    if (event.target.closest && event.target.closest('.j7zh-ca-badge')) return;
+    pop.remove();
+  }, true);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeCaPopover();
+  }, true);
+
+  function caWhen(value) {
+    if (value == null || value === '') return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+    return date.toISOString().slice(0, 10);
+  }
+
+  function caText(row) {
+    if (!row || row.error || row.pending) return row && row.pending ? 'CA索引中' : '';
+    const total = (Number(row.undeleted) || 0) + (Number(row.deleted) || 0);
+    if (!total && !(row.items && row.items.length)) return '未发CA';
+    return '历史CA ' + (total || row.items.length);
+  }
+
+  function openCaPopover(username, anchor) {
+    closeCaPopover();
+    const row = CA.map.get(username.toLowerCase());
+    if (!row || row.error) return;
+    const pop = document.createElement('div');
+    pop.id = 'j7zh-ca-pop';
+    pop.className = 'j7zh-ca-pop';
+    const items = Array.isArray(row.items) ? row.items : [];
+    const head = document.createElement('div');
+    head.className = 'j7zh-ca-pop-title';
+    head.textContent = '@' + username + ' · 未删 ' + (row.undeleted || 0) + ' · 已删 ' + (row.deleted || 0);
+    pop.appendChild(head);
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.className = 'j7zh-ca-pop-empty';
+      const total = (Number(row.undeleted) || 0) + (Number(row.deleted) || 0);
+      empty.textContent = row.pending ? 'Frontrun 还在索引，稍后再看' : (total ? '有计数，但这页没有具体合约' : '没有合约记录');
+      pop.appendChild(empty);
+    }
+    for (const item of items) {
+      const line = document.createElement('button');
+      line.type = 'button';
+      line.className = 'j7zh-ca-pop-row';
+      const when = caWhen(item.time);
+      line.textContent = (item.deleted ? '删 ' : '') + (item.chain ? item.chain + ' ' : '') + item.ca + (when ? '  ' + when : '');
+      line.title = '点击复制';
+      line.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try { await navigator.clipboard.writeText(item.ca); line.textContent = '已复制 ' + item.ca; } catch (error) {}
+      });
+      pop.appendChild(line);
+    }
+    document.body.appendChild(pop);
+    const rect = anchor.getBoundingClientRect();
+    pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - pop.offsetWidth - 8)) + 'px';
+    pop.style.top = Math.min(rect.bottom + 6, window.innerHeight - pop.offsetHeight - 8) + 'px';
+  }
+
+  function renderCaBadge(author, username) {
+    const key = username.toLowerCase();
+    let badge = author.querySelector('.j7zh-ca-badge[data-j7zh-user="' + key + '"]');
+    const row = CA.map.get(key);
+    const text = caText(row);
+    if (!text) {
+      if (badge) badge.remove();
+      return;
+    }
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'j7zh-ca-badge';
+      badge.dataset.j7zhUser = key;
+      badge.setAttribute('role', 'button');
+      badge.setAttribute('tabindex', '0');
+      const edit = author.querySelector('.j7zh-label-edit[data-j7zh-user="' + key + '"]');
+      const label = author.querySelector('.j7zh-user-label[data-j7zh-user="' + key + '"]');
+      const after = edit || label;
+      if (after) after.insertAdjacentElement('afterend', badge);
+      else author.appendChild(badge);
+      const open = (event) => {
+        if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        event.stopPropagation();
+        openCaPopover(username, badge);
+      };
+      badge.addEventListener('click', open);
+      badge.addEventListener('keydown', open);
+    }
+    const total = row ? (Number(row.undeleted) || 0) + (Number(row.deleted) || 0) : 0;
+    badge.classList.toggle('has', total > 0 || (row && row.items && row.items.length));
+    badge.classList.toggle('none', text === '未发CA');
+    badge.title = text === '未发CA' ? 'Frontrun 没有这个号发过的合约' : '点击查看历史 CA';
+    if (badge.textContent !== text) badge.textContent = text;
+  }
+
+  function queueCa(username) {
+    if (!LABELS.configSaved) return;
+    const key = username.toLowerCase();
+    const hit = CA.map.get(key);
+    if (hit && hit.fetchedAt && Date.now() - hit.fetchedAt < (hit.pending ? 90000 : hit.error ? 300000 : 6 * 3600 * 1000)) return;
+    if (CA.pending.has(key)) return;
+    CA.pending.add(key);
+    clearTimeout(CA.timer);
+    CA.timer = setTimeout(flushCa, 800);
+  }
+
+  function flushCa() {
+    const names = [...CA.pending].slice(0, 8);
+    names.forEach((name) => CA.pending.delete(name));
+    if (CA.pending.size) CA.timer = setTimeout(flushCa, 4000);
+    if (!names.length) return;
+    sendLabelMessage({ type: 'j7zh-label-ca-get', usernames: names }).then((result) => {
+      for (const row of result.rows || []) {
+        if (row && row.username) CA.map.set(String(row.username).toLowerCase(), row);
+      }
+      scanLabels(document.body);
+    }).catch((error) => { LABELS.status = error.message; });
+  }
+
   function scanLabels(root) {
     if (!LU || !root) return;
     const scope = root.nodeType === 1 ? root : document.body;
@@ -928,6 +1057,7 @@
       if (!S.labels) {
         if (badge) badge.remove();
         if (edit) edit.remove();
+        author.querySelectorAll('.j7zh-ca-badge[data-j7zh-user="' + key + '"]').forEach((node) => node.remove());
         continue;
       }
       const target = labelTarget(author);
@@ -966,11 +1096,14 @@
         edit.addEventListener('keydown', activate);
       }
       if (LABELS.loaded && LU.shouldRefreshEmpty(row, LABELS.emptyTtlHours)) queueMissingLabel(username);
+      renderCaBadge(author, username);
+      queueCa(username);
     }
   }
 
   function removeLabelBadges() {
-    document.querySelectorAll('.j7zh-user-label, .j7zh-label-edit').forEach((node) => node.remove());
+    closeCaPopover();
+    document.querySelectorAll('.j7zh-user-label, .j7zh-label-edit, .j7zh-ca-badge').forEach((node) => node.remove());
     closeQuickLabelEditor();
     closeLabelManager();
   }
@@ -1257,6 +1390,11 @@
           scanLabels(document.body);
         } else if (message.type === 'j7zh-label-progress') {
           applyPublicLabelState(message.state);
+        } else if (message.type === 'j7zh-ca-changed') {
+          for (const row of message.rows || []) {
+            if (row && row.username) CA.map.set(String(row.username).toLowerCase(), row);
+          }
+          scanLabels(document.body);
         }
       });
     }
@@ -1407,7 +1545,7 @@
 
   /* ---------- 启动 ---------- */
   // 调试钩子（控制台可用 __j7zh.walk(document.body) 手动补扫，__j7zh.scan() 重扫翻译）
-  window.__j7zh = { walk, lookup, settings: S, version: '1.8.0', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
+  window.__j7zh = { walk, lookup, settings: S, version: '1.9.0', scan: () => scanUnits(document.body), labels: LABELS, scanLabels: () => scanLabels(document.body), tr: TR, local: LOCAL, engine: engineInUse, lastErr: null };
 
   document.addEventListener('pointerdown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
   document.addEventListener('keydown', () => { try { if (LOCAL.ok) LOCAL.retryOnGesture(); } catch (e) {} }, true);
